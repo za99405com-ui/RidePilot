@@ -302,16 +302,52 @@ object InDriveParser {
         val tripTime = if (times.size >= 2) times[1] else null
 
         val excluded = (distanceTexts + timeTexts + listOfNotNull(priceText)).toSet()
-        val addresses = texts.filter { text ->
-            text !in excluded &&
-                !text.contains("طلب ركوب") &&
-                !text.contains("سداد") &&
-                !text.contains("★") &&
-                !text.contains("تقديم عرض") &&
-                !text.contains("القبول مقابل") &&
-                !text.contains("اعرض الأجرة") &&
-                text.length > 6
+
+        fun isAddressLike(text: String): Boolean {
+            if (text in excluded) return false
+            if (text.length < 6) return false
+            val blocked = listOf(
+                "طلب ركوب", "سداد", "تقديم عرض", "القبول مقابل", "اعرض الأجرة",
+                "اقترح أجرتك", "السعر العادل", "إغلاق", "حصري", "نقدي"
+            )
+            if (blocked.any { text.contains(it, ignoreCase = true) }) return false
+            if (text.contains("★")) return false
+            if (Regex("""^\s*\d+(?:[.,]\d+)?\s*EGP\s*$""", RegexOption.IGNORE_CASE)
+                    .matches(ArabicNumberHelper.normalizeDigits(text))) return false
+            return true
         }
+
+        fun joinAddressRange(startExclusive: Int, endExclusive: Int): String? {
+            if (startExclusive < 0 || endExclusive <= startExclusive + 1) return null
+            val candidates = texts
+                .subList(startExclusive + 1, endExclusive.coerceAtMost(texts.size))
+                .filter(::isAddressLike)
+                .take(3)
+            return candidates.takeIf { it.isNotEmpty() }?.joinToString(" ")
+        }
+
+        val markerA = texts.indexOfFirst { it.trim().equals("A", ignoreCase = true) }
+        val markerB = texts.indexOfFirst { it.trim().equals("B", ignoreCase = true) }
+
+        val pickupFromMarkers = if (markerA >= 0 && markerB > markerA) {
+            joinAddressRange(markerA, markerB)
+        } else null
+
+        val actionBoundary = if (markerB >= 0) {
+            texts.indexOfFirst { idxText ->
+                texts.indexOf(idxText) > markerB && (
+                    idxText.contains("القبول مقابل") ||
+                    idxText.contains("اقترح أجرتك") ||
+                    idxText.contains("إغلاق")
+                )
+            }.takeIf { it > markerB } ?: texts.size
+        } else texts.size
+
+        val destinationFromMarkers = if (markerB >= 0) {
+            joinAddressRange(markerB, actionBoundary)
+        } else null
+
+        val fallbackAddresses = texts.filter(::isAddressLike)
 
         return RideOffer(
             app = AppTarget.INDRIVE,
@@ -320,8 +356,8 @@ object InDriveParser {
             pickupTimeMinutes = pickupTime,
             tripDistanceKm = tripDistance,
             tripTimeMinutes = tripTime,
-            pickupAddress = addresses.getOrNull(0),
-            destinationAddress = addresses.getOrNull(1),
+            pickupAddress = pickupFromMarkers ?: fallbackAddresses.getOrNull(0),
+            destinationAddress = destinationFromMarkers ?: fallbackAddresses.getOrNull(1),
             confidence = when {
                 price != null && tripDistance != null && addresses.size >= 2 -> 95
                 price != null && tripDistance != null -> 85
