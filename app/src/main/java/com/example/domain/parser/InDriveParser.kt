@@ -282,28 +282,53 @@ object InDriveParser {
         val priceText = texts.firstOrNull { it.contains("EGP") || it.contains("E£") || it.contains("ج.م") }
         val price = ArabicNumberHelper.extractFirstDouble(priceText)
 
-        val distText = texts.firstOrNull { it.contains("كلم") || it.contains("كم") }
-        val dist = ArabicNumberHelper.extractDistanceKm(distText)
+        val distanceTexts = texts.filter {
+            it.contains("كلم") || it.contains("كم") || it.contains("km", ignoreCase = true) || it.contains("متر")
+        }
+        val distances = distanceTexts.mapNotNull { ArabicNumberHelper.extractDistanceKm(it) }
 
-        val timeText = texts.firstOrNull { it.contains("دقيقة") }
-        val time = ArabicNumberHelper.extractFirstDouble(timeText)?.toInt()
+        val timeTexts = texts.filter {
+            it.contains("دقيقة") || Regex("""\b\d+\s*د\b""").containsMatchIn(ArabicNumberHelper.normalizeDigits(it))
+        }
+        val times = timeTexts.mapNotNull { ArabicNumberHelper.extractFirstDouble(it)?.toInt() }
 
-        val addresses = texts.filter {
-            it != priceText && it != distText && it != timeText &&
-            !it.contains("طلب ركوب") && !it.contains("سداد") && !it.contains("★") && it.length > 6
+        val pickupDistance = if (distances.size >= 2) distances[0] else null
+        val tripDistance = when {
+            distances.size >= 2 -> distances[1]
+            distances.size == 1 -> distances[0]
+            else -> null
+        }
+        val pickupTime = if (times.size >= 2) times[0] else times.firstOrNull()
+        val tripTime = if (times.size >= 2) times[1] else null
+
+        val excluded = (distanceTexts + timeTexts + listOfNotNull(priceText)).toSet()
+        val addresses = texts.filter { text ->
+            text !in excluded &&
+                !text.contains("طلب ركوب") &&
+                !text.contains("سداد") &&
+                !text.contains("★") &&
+                !text.contains("تقديم عرض") &&
+                !text.contains("القبول مقابل") &&
+                !text.contains("اعرض الأجرة") &&
+                text.length > 6
         }
 
         return RideOffer(
             app = AppTarget.INDRIVE,
             displayedPrice = price,
-            pickupDistanceKm = null,
-            pickupTimeMinutes = time,
-            tripDistanceKm = dist,
-            tripTimeMinutes = null,
+            pickupDistanceKm = pickupDistance,
+            pickupTimeMinutes = pickupTime,
+            tripDistanceKm = tripDistance,
+            tripTimeMinutes = tripTime,
             pickupAddress = addresses.getOrNull(0),
             destinationAddress = addresses.getOrNull(1),
-            confidence = if (price != null && dist != null) 90 else 50,
+            confidence = when {
+                price != null && tripDistance != null && addresses.size >= 2 -> 95
+                price != null && tripDistance != null -> 85
+                else -> 50
+            },
             rawSource = "ACCESSIBILITY"
         )
     }
+
 }
