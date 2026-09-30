@@ -254,48 +254,81 @@ object InDriveParser {
     }
 
     private fun extractOrderCardsFromList(root: AccessibilityNodeInfo, cardsOut: MutableList<InDriveOrderCard>) {
+        val candidates = mutableListOf<InDriveOrderCard>()
+
         fun scan(node: AccessibilityNodeInfo) {
             val rect = Rect()
             node.getBoundsInScreen(rect)
 
-            // Look for nodes that encapsulate an order: has price (EGP) and distance
-            val childTexts = mutableListOf<String>()
-            fun collectChildTexts(childNode: AccessibilityNodeInfo) {
-                val t = (childNode.text?.toString() ?: childNode.contentDescription?.toString())?.trim()
-                if (!t.isNullOrBlank()) childTexts.add(t)
-                for (j in 0 until childNode.childCount) {
-                    val c = childNode.getChild(j) ?: continue
-                    collectChildTexts(c)
-                }
-            }
+            // Some inDrive builds expose the visual card container as non-clickable
+            // while one of its ancestors handles the click. Detect by geometry/content
+            // first and let ClickNode climb the parent chain when needed.
+            val looksCardSized =
+                rect.width() > 500 &&
+                    rect.height() in 100..650 &&
+                    node.childCount in 1..20
 
-            if (node.isClickable && rect.height() in 100..600 && rect.width() > 500) {
+            if (looksCardSized) {
+                val childTexts = mutableListOf<String>()
+
+                fun collectChildTexts(childNode: AccessibilityNodeInfo) {
+                    val t = (
+                        childNode.text?.toString()
+                            ?: childNode.contentDescription?.toString()
+                        )?.trim()
+
+                    if (!t.isNullOrBlank()) childTexts.add(t)
+
+                    for (j in 0 until childNode.childCount) {
+                        val child = childNode.getChild(j) ?: continue
+                        collectChildTexts(child)
+                    }
+                }
+
                 collectChildTexts(node)
-                val priceText = childTexts.firstOrNull { it.contains("EGP") || it.contains("ج.م") }
-                val distText = childTexts.firstOrNull { it.contains("كلم") || it.contains("كم") || it.contains("متر") }
+
+                val priceText = childTexts.firstOrNull {
+                    it.contains("EGP", ignoreCase = true) ||
+                        it.contains("E£", ignoreCase = true) ||
+                        it.contains("ج.م") ||
+                        it.contains("جنيه")
+                }
+
+                val distText = childTexts.firstOrNull {
+                    it.contains("كلم") ||
+                        it.contains("كم") ||
+                        it.contains("km", ignoreCase = true) ||
+                        it.contains("متر")
+                }
 
                 if (priceText != null && distText != null) {
                     val price = ArabicNumberHelper.extractFirstDouble(priceText)
                     val dist = ArabicNumberHelper.extractDistanceKm(distText)
 
-                    // Pick addresses from remaining texts
-                    val addressCandidates = childTexts.filter {
-                        it != priceText && it != distText &&
-                        !it.contains("EGP") && !it.contains("سداد") && !it.contains("★") && it.length > 5
-                    }
-                    val pickup = addressCandidates.getOrNull(0)
-                    val dest = addressCandidates.getOrNull(1)
+                    if (price != null && price > 0.0 && dist != null && dist > 0.0) {
+                        val addressCandidates = childTexts.filter {
+                            it != priceText &&
+                                it != distText &&
+                                !it.contains("EGP", ignoreCase = true) &&
+                                !it.contains("E£", ignoreCase = true) &&
+                                !it.contains("ج.م") &&
+                                !it.contains("سداد") &&
+                                !it.contains("★") &&
+                                !it.contains("طلب ركوب") &&
+                                it.length > 5
+                        }
 
-                    cardsOut.add(
-                        InDriveOrderCard(
-                            priceEgp = price,
-                            distanceKm = dist,
-                            pickupAddress = pickup,
-                            destinationAddress = dest,
-                            bounds = rect,
-                            node = node
+                        candidates.add(
+                            InDriveOrderCard(
+                                priceEgp = price,
+                                distanceKm = dist,
+                                pickupAddress = addressCandidates.getOrNull(0),
+                                destinationAddress = addressCandidates.getOrNull(1),
+                                bounds = Rect(rect),
+                                node = node
+                            )
                         )
-                    )
+                    }
                 }
             }
 
@@ -306,6 +339,39 @@ object InDriveParser {
         }
 
         scan(root)
+
+        // Nested accessibility containers can describe the same visual request card.
+        // Keep the smallest container per visual row to avoid opening one order twice.
+        val unique = candidates
+            .sortedWith(
+                compareBy<InDriveOrderCard> { it.bounds.top }
+                    .thenBy { it.bounds.width() * it.bounds.height() }
+            )
+            .fold(mutableListOf<InDriveOrderCard>()) { acc, card ->
+                val duplicateIndex = acc.indexOfFirst { existing ->
+                    kotlin.math.abs(
+                        existing.bounds.exactCenterY() - card.bounds.exactCenterY()
+                    ) < 32f &&
+                        kotlin.math.abs(
+                            (existing.priceEgp ?: 0.0) - (card.priceEgp ?: 0.0)
+                        ) < 0.01
+                }
+
+                if (duplicateIndex < 0) {
+                    acc.add(card)
+                } else {
+                    val existing = acc[duplicateIndex]
+                    val existingArea = existing.bounds.width() * existing.bounds.height()
+                    val candidateArea = card.bounds.width() * card.bounds.height()
+                    if (candidateArea < existingArea) {
+                        acc[duplicateIndex] = card
+                    }
+                }
+                acc
+            }
+            .sortedBy { it.bounds.top }
+
+        cardsOut.addAll(unique)
     }
 
     private fun extractActiveOrderDetails(root: AccessibilityNodeInfo): RideOffer? {
