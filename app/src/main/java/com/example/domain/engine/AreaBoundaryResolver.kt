@@ -174,7 +174,7 @@ object AreaBoundaryResolver {
         val display = json.optString("display_name").ifBlank { name }
         val osmType = json.optString("osm_type").ifBlank { "area" }
         val osmId = json.optLong("osm_id", 0L)
-        val key = if (osmId != 0L) "\${osmType}:\${osmId}" else "\${name}:\${lat}:\${lon}"
+        val key = if (osmId != 0L) "${osmType}:${osmId}" else "${name}:${lat}:${lon}"
 
         return RecognizedArea(
             name = name,
