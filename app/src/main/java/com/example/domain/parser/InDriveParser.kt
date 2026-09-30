@@ -316,7 +316,16 @@ object InDriveParser {
         }
         collect(root)
 
-        val priceText = texts.firstOrNull { it.contains("EGP") || it.contains("E£") || it.contains("ج.م") }
+        // Prefer the actual passenger fare shown in the accept button.
+        // Quick-offer chips also contain "EGP" and must not be mistaken for the fare.
+        val acceptPriceText = texts.firstOrNull {
+            it.contains("القبول مقابل") && (it.contains("EGP") || it.contains("E£") || it.contains("ج.م"))
+        }
+        val priceText = acceptPriceText ?: texts.firstOrNull {
+            (it.contains("EGP") || it.contains("E£") || it.contains("ج.م")) &&
+                !Regex("""^\s*\d+(?:[.,]\d+)?\s*EGP\s*$""", RegexOption.IGNORE_CASE)
+                    .matches(ArabicNumberHelper.normalizeDigits(it))
+        } ?: texts.firstOrNull { it.contains("EGP") || it.contains("E£") || it.contains("ج.م") }
         val price = ArabicNumberHelper.extractFirstDouble(priceText)
 
         val distanceTexts = texts.filter {
