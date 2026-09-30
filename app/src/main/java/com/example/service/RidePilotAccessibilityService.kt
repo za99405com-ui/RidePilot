@@ -28,6 +28,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -100,6 +102,23 @@ class RidePilotAccessibilityService : AccessibilityService() {
             RidePilotApplication.instance.settingsRepository.applyV3AutomationDefaultsOnce()
             delay(120)
             requestWindowProcessing()
+        }
+
+        // Runtime state changes must take effect immediately even when neither
+        // rideshare app emits a new AccessibilityEvent (Pause/Resume/STOP).
+        serviceScope.launch {
+            val settings = RidePilotApplication.instance.settingsRepository
+            combine(
+                settings.automationEnabled,
+                settings.emergencyStop,
+                settings.overlayEnabled
+            ) { enabled, stopped, overlay ->
+                Triple(enabled, stopped, overlay)
+            }
+                .distinctUntilChanged()
+                .collect {
+                    requestWindowProcessing()
+                }
         }
         Log.i(TAG, "RidePilot Accessibility Service Connected")
     }
