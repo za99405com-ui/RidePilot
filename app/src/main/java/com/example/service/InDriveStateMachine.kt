@@ -17,6 +17,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.abs
 
 class InDriveStateMachine(
     private val gestureDispatcher: suspend (GestureAction) -> Boolean,
@@ -44,6 +45,8 @@ class InDriveStateMachine(
     private var consecutiveErrors = 0
     private var pendingCounterPrice: Double? = null
     private var lastConfirmedOfflineAt: Long = 0L
+    private var openedCardBounds: Rect? = null
+    private var pendingSwipeAfterReturn: Boolean = false
 
     fun reset() {
         _currentState.value = AutomationState.IDLE
@@ -52,6 +55,8 @@ class InDriveStateMachine(
         consecutiveErrors = 0
         pendingCounterPrice = null
         lastConfirmedOfflineAt = 0L
+        openedCardBounds = null
+        pendingSwipeAfterReturn = false
     }
 
     suspend fun processScreen(
@@ -124,6 +129,31 @@ class InDriveStateMachine(
                 currentAttemptCount = 0
                 pendingCounterPrice = null
 
+                if (pendingSwipeAfterReturn && openedCardBounds != null && parsed.orderCards.isNotEmpty()) {
+                    val previous = openedCardBounds!!
+                    val target = parsed.orderCards.minByOrNull {
+                        abs(it.bounds.exactCenterY() - previous.exactCenterY())
+                    }
+                    if (target != null) {
+                        val b = target.bounds
+                        val startX = if (swipeDirection == SwipeDirection.SWIPE_LEFT) b.right - 50f else b.left + 50f
+                        val endX = if (swipeDirection == SwipeDirection.SWIPE_LEFT) b.left + 50f else b.right - 50f
+                        val midY = b.exactCenterY()
+                        logger(
+                            "SWIPE_VERIFIED_OUT_OF_ZONE",
+                            "تم الرجوع لقائمة الطلبات؛ سحب الطلب الذي تأكد أنه خارج الـZone",
+                            target.priceEgp,
+                            target.distanceKm,
+                            parsed.confidence
+                        )
+                        lastSwipedCardBounds = Rect(b)
+                        pendingSwipeAfterReturn = false
+                        openedCardBounds = null
+                        gestureDispatcher(GestureAction.Swipe(startX, midY, endX, midY, 300))
+                        return
+                    }
+                }
+
                 if (parsed.orderCards.isNotEmpty()) {
                     _currentState.value = AutomationState.READING_ORDERS
                     for (card in parsed.orderCards) {
@@ -149,7 +179,9 @@ class InDriveStateMachine(
                                 card.distanceKm,
                                 parsed.confidence
                             )
-                            val opened = if (card.node != null) {
+                            openedCardBounds = Rect(card.bounds)
+                            openedCardBounds = Rect(card.bounds)
+                        val opened = if (card.node != null) {
                                 gestureDispatcher(GestureAction.ClickNode(card.node))
                             } else {
                                 false
@@ -246,6 +278,7 @@ class InDriveStateMachine(
                 }
 
                 if (!detailZone.isAllowed) {
+                    pendingSwipeAfterReturn = openedCardBounds != null
                     _currentState.value = AutomationState.RETURN_TO_REQUESTS
                     logger(
                         "DETAILS_OUT_OF_ZONE",
