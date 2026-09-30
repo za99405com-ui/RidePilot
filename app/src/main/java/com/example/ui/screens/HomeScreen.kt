@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -117,24 +118,43 @@ fun HomeScreen(navController: NavController) {
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    if (automationEnabled) "التحكم التلقائي شغّال" else "التحكم التلقائي متوقف",
-                                    color = TextPrimary,
+                                    when {
+                                        emergencyStop -> "STOP نهائي"
+                                        automationEnabled -> "التحكم التلقائي شغّال"
+                                        else -> "متوقف مؤقتًا"
+                                    },
+                                    color = if (emergencyStop) DangerRed else TextPrimary,
                                     fontSize = 18.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    if (automationEnabled) "inDrive ينفّذ قواعدك • Uber يقرأ ويحلّل"
-                                    else "فعّله بعد ضبط التسعير والزون",
+                                    when {
+                                        emergencyStop -> "لن يعمل أو يظهر مجددًا إلا بعد تشغيله من RidePilot"
+                                        automationEnabled -> "inDrive ينفّذ قواعدك • Uber يقرأ ويحلّل"
+                                        else -> "يمكنك الاستئناف من التطبيق أو الفقاعة"
+                                    },
                                     color = TextSecondary,
                                     fontSize = 12.sp
                                 )
                             }
                             Switch(
-                                checked = automationEnabled,
+                                checked = automationEnabled && !emergencyStop,
                                 onCheckedChange = { enabled ->
                                     scope.launch {
-                                        if (enabled) app.settingsRepository.setEmergencyStop(false)
-                                        app.settingsRepository.setAutomationEnabled(enabled)
+                                        if (enabled) {
+                                            // Starting after HARD STOP is only allowed here, inside RidePilot.
+                                            app.settingsRepository.startAutomationFromApp()
+                                            if (Settings.canDrawOverlays(context)) {
+                                                val overlayIntent = Intent(context, RidePilotOverlayService::class.java)
+                                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                                    context.startForegroundService(overlayIntent)
+                                                } else {
+                                                    context.startService(overlayIntent)
+                                                }
+                                            }
+                                        } else {
+                                            app.settingsRepository.pauseAutomation()
+                                        }
                                     }
                                 },
                                 colors = SwitchDefaults.colors(
@@ -145,10 +165,21 @@ fun HomeScreen(navController: NavController) {
                                 )
                             )
                         }
-                        if (emergencyStop) {
-                            Spacer(Modifier.height(10.dp))
-                            Text("إيقاف الطوارئ مفعّل", color = DangerRed, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            when {
+                                emergencyStop -> "الإيقاف النهائي مفعّل • أعد التشغيل من هذا التطبيق فقط"
+                                automationEnabled -> "الحالة: شغال"
+                                else -> "الحالة: Pause مؤقت"
+                            },
+                            color = when {
+                                emergencyStop -> DangerRed
+                                automationEnabled -> SuccessGreen
+                                else -> TextSecondary
+                            },
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }
@@ -268,17 +299,25 @@ fun HomeScreen(navController: NavController) {
                 Button(
                     onClick = {
                         scope.launch {
-                            app.settingsRepository.setEmergencyStop(true)
+                            app.settingsRepository.hardStop()
                             context.stopService(Intent(context, RidePilotOverlayService::class.java))
                         }
                     },
+                    enabled = !emergencyStop,
                     modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(containerColor = DangerRed),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = DangerRed,
+                        disabledContainerColor = DangerRed.copy(alpha = 0.35f)
+                    ),
                     shape = RoundedCornerShape(16.dp)
                 ) {
                     Icon(Icons.Default.StopCircle, null)
                     Spacer(Modifier.size(8.dp))
-                    Text("إيقاف طوارئ", fontWeight = FontWeight.Bold)
+                    Text(
+                        if (emergencyStop) "STOP مفعّل — التشغيل من أعلى"
+                        else "STOP نهائي",
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             }
         }
