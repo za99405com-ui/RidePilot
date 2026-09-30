@@ -85,8 +85,8 @@ import org.json.JSONObject
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
+import org.osmdroid.views.overlay.Polyline
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -104,6 +104,7 @@ fun ZonesScreen(
 
     val drawnPoints = remember { mutableStateListOf<GeoPoint>() }
     var mapViewInstance by remember { mutableStateOf<MapView?>(null) }
+    val drawMode = remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -116,6 +117,7 @@ fun ZonesScreen(
                 },
                 actions = {
                     IconButton(onClick = {
+                        drawMode.value = false
                         drawnPoints.clear()
                         mapViewInstance?.overlays?.clear()
                         mapViewInstance?.invalidate()
@@ -160,35 +162,71 @@ fun ZonesScreen(
                             // Default to Alexandria center (31.2001, 29.9187)
                             controller.setCenter(GeoPoint(31.2200, 29.9500))
 
-                            // Tap overlay to place polygon vertices
+                            // Freehand zone drawing: press "ابدأ الرسم", then trace the boundary
+                            // with one continuous finger gesture. This is much easier than placing corners.
                             val touchOverlay = object : org.osmdroid.views.overlay.Overlay() {
-                                override fun onSingleTapConfirmed(e: MotionEvent?, mapView: MapView?): Boolean {
-                                    if (e != null && mapView != null) {
-                                        val proj = mapView.projection
-                                        val geoPoint = proj.fromPixels(e.x.toInt(), e.y.toInt()) as GeoPoint
-                                        drawnPoints.add(geoPoint)
+                                private var lastX = 0f
+                                private var lastY = 0f
 
-                                        // Add marker
-                                        val marker = Marker(mapView).apply {
-                                            position = geoPoint
-                                            title = "نقطة ${drawnPoints.size}"
-                                        }
-                                        mapView.overlays.add(marker)
+                                override fun onTouchEvent(event: MotionEvent?, mapView: MapView?): Boolean {
+                                    if (!drawMode.value || event == null || mapView == null) return false
 
-                                        // If >= 3 points, render polygon
-                                        if (drawnPoints.size >= 3) {
-                                            val polygon = Polygon(mapView).apply {
-                                                points = drawnPoints
-                                                fillPaint.color = 0x4010B981.toInt()
-                                                outlinePaint.color = 0xFF10B981.toInt()
-                                                outlinePaint.strokeWidth = 4f
-                                            }
-                                            mapView.overlays.add(polygon)
+                                    fun addPoint(x: Float, y: Float) {
+                                        val p = mapView.projection.fromPixels(x.toInt(), y.toInt()) as GeoPoint
+                                        drawnPoints.add(p)
+
+                                        mapView.overlays.removeAll { it is Polyline || it is Polygon }
+                                        if (drawnPoints.size >= 2) {
+                                            mapView.overlays.add(
+                                                Polyline(mapView).apply {
+                                                    setPoints(drawnPoints.toList())
+                                                    outlinePaint.color = 0xFF5B9CFF.toInt()
+                                                    outlinePaint.strokeWidth = 7f
+                                                }
+                                            )
                                         }
                                         mapView.invalidate()
-                                        return true
                                     }
-                                    return false
+
+                                    when (event.actionMasked) {
+                                        MotionEvent.ACTION_DOWN -> {
+                                            drawnPoints.clear()
+                                            mapView.overlays.removeAll { it is Polyline || it is Polygon }
+                                            lastX = event.x
+                                            lastY = event.y
+                                            addPoint(event.x, event.y)
+                                            return true
+                                        }
+
+                                        MotionEvent.ACTION_MOVE -> {
+                                            val dx = event.x - lastX
+                                            val dy = event.y - lastY
+                                            if ((dx * dx + dy * dy) >= 144f) {
+                                                lastX = event.x
+                                                lastY = event.y
+                                                addPoint(event.x, event.y)
+                                            }
+                                            return true
+                                        }
+
+                                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                                            if (drawnPoints.size >= 3) {
+                                                mapView.overlays.removeAll { it is Polyline || it is Polygon }
+                                                mapView.overlays.add(
+                                                    Polygon(mapView).apply {
+                                                        points = drawnPoints.toList()
+                                                        fillPaint.color = 0x335B9CFF
+                                                        outlinePaint.color = 0xFF5B9CFF.toInt()
+                                                        outlinePaint.strokeWidth = 6f
+                                                    }
+                                                )
+                                                drawMode.value = false
+                                            }
+                                            mapView.invalidate()
+                                            return true
+                                        }
+                                    }
+                                    return true
                                 }
                             }
                             overlays.add(touchOverlay)
@@ -198,20 +236,47 @@ fun ZonesScreen(
                     modifier = Modifier.fillMaxSize()
                 )
 
-                // Instruction Overlay Badge
                 Card(
                     modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(8.dp),
-                    colors = CardDefaults.cardColors(containerColor = DarkCard.copy(alpha = 0.9f)),
-                    shape = RoundedCornerShape(8.dp)
+                        .align(Alignment.TopCenter)
+                        .padding(10.dp),
+                    colors = CardDefaults.cardColors(containerColor = DarkCard.copy(alpha = 0.94f)),
+                    shape = RoundedCornerShape(12.dp)
                 ) {
                     Text(
-                        text = if (drawnPoints.isEmpty()) "اضغط على الخريطة لتحديد زوايا الـ Polygon" else "تم تحديد ${drawnPoints.size} نقاط",
+                        text = when {
+                            drawMode.value -> "ارسم حدود منطقة شغلك بإصبعك ثم ارفع إيدك"
+                            drawnPoints.size >= 3 -> "✓ المنطقة مرسومة — احفظها من زر +"
+                            else -> "حرّك الخريطة للمكان المطلوب ثم اضغط «ابدأ الرسم»"
+                        },
                         fontSize = 11.sp,
-                        color = EmeraldPrimary,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                        color = if (drawMode.value) AmberAccent else TextPrimary,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
                         fontWeight = FontWeight.Medium
+                    )
+                }
+
+                Button(
+                    onClick = {
+                        if (!drawMode.value) {
+                            drawnPoints.clear()
+                            mapViewInstance?.overlays?.removeAll { it is Polyline || it is Polygon }
+                            mapViewInstance?.invalidate()
+                        }
+                        drawMode.value = !drawMode.value
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (drawMode.value) DangerRed else EmeraldPrimary
+                    ),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text(
+                        if (drawMode.value) "إلغاء الرسم" else "ابدأ الرسم",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
                     )
                 }
             }
