@@ -8,17 +8,14 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
-import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.Button
-import android.widget.FrameLayout
-import android.widget.ImageButton
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
@@ -31,6 +28,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 class RidePilotOverlayService : Service() {
 
@@ -43,14 +41,8 @@ class RidePilotOverlayService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var windowManager: WindowManager? = null
-    private var overlayView: View? = null
+    private var overlayRoot: LinearLayout? = null
     private var layoutParams: WindowManager.LayoutParams? = null
-
-    private var initialX = 0
-    private var initialY = 0
-    private var initialTouchX = 0f
-    private var initialTouchY = 0f
-    private var isMinimized = true
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -59,51 +51,50 @@ class RidePilotOverlayService : Service() {
         isOverlayRunning = true
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, createNotification())
-        createFloatingOverlay()
-        observeLiveState()
+        createBubble()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         isOverlayRunning = false
         serviceScope.cancel()
-        overlayView?.let { windowManager?.removeView(it) }
+        overlayRoot?.let { windowManager?.removeView(it) }
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "RidePilot Assistant",
+                "RidePilot",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "المساعد العائم لقراءة طلبات Uber وinDrive"
+                description = "RidePilot يعمل في الخلفية"
             }
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.createNotificationChannel(channel)
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                .createNotificationChannel(channel)
         }
     }
 
     private fun createNotification(): Notification {
-        val launchIntent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
-            this, 0, launchIntent,
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
-
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("RidePilot شغال")
-            .setContentText("المساعد العائم يراقب شاشات Uber وinDrive")
+            .setContentTitle("RidePilot يعمل")
+            .setContentText("مراقبة طلبات Uber وinDrive")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
     }
 
-    private fun createFloatingOverlay() {
+    private fun createBubble() {
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-
-        val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val density = resources.displayMetrics.density
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         } else {
             @Suppress("DEPRECATION")
@@ -113,245 +104,228 @@ class RidePilotOverlayService : Service() {
         layoutParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
-            layoutType,
+            type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 12
-            y = 70
+            x = (8 * density).toInt()
+            y = (150 * density).toInt()
         }
 
-        val context = this
-        val root = FrameLayout(context).apply {
-            setBackgroundColor(0x00000000)
-        }
-
-        val density = resources.displayMetrics.density
-        val cardLayout = LinearLayout(context).apply {
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding((14 * density).toInt(), (10 * density).toInt(), (14 * density).toInt(), (10 * density).toInt())
-            setBackgroundColor(0xF20B0D12.toInt())
-            elevation = 12f
-            layoutParams = FrameLayout.LayoutParams((190 * density).toInt(), FrameLayout.LayoutParams.WRAP_CONTENT)
+            gravity = Gravity.START
         }
 
-        // Header with App Title, Minimize and Drag Handle
-        val headerRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-
-        val titleText = TextView(context).apply {
-            text = "RidePilot"
-            setTextColor(0xFF5B9CFF.toInt())
-            textSize = 13f
-            setTypeface(null, android.graphics.Typeface.BOLD)
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-
-        val minimizeBtn = TextView(context).apply {
-            text = "—"
-            setTextColor(0xFF94A3B8.toInt())
-            textSize = 18f
-            setPadding(16, 0, 16, 0)
-        }
-
-        val closeBtn = TextView(context).apply {
-            text = "✕"
-            setTextColor(0xFFEF4444.toInt())
-            textSize = 16f
-            setPadding(16, 0, 8, 0)
-        }
-
-        headerRow.addView(titleText)
-        headerRow.addView(minimizeBtn)
-        headerRow.addView(closeBtn)
-        cardLayout.addView(headerRow)
-
-        // Body Container (collapsible)
-        val bodyLayout = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, 12, 0, 0)
-        }
-
-        val statusBadge = TextView(context).apply {
-            text = "في انتظار الطلب..."
-            textSize = 12.5f
-            setTypeface(null, android.graphics.Typeface.BOLD)
-            setTextColor(0xFFF59E0B.toInt()) // amber
-        }
-
-        val detailsText = TextView(context).apply {
-            text = "افتح Uber أو inDrive لبدء التحليل التلقائي"
-            textSize = 10.5f
-            setTextColor(0xFFB8BDC8.toInt())
-            setPadding(0, (4 * density).toInt(), 0, (6 * density).toInt())
-            maxLines = 4
-        }
-
-        // Action Buttons Row: PAUSE & STOP
-        val btnRow = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
+        val bubble = TextView(this).apply {
+            text = "R"
             gravity = Gravity.CENTER
-            setPadding(0, 8, 0, 0)
+            textSize = 16f
+            setTextColor(0xFFFFFFFF.toInt())
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            background = bubbleDrawable(0xFF3978D9.toInt())
+            layoutParams = LinearLayout.LayoutParams(
+                (48 * density).toInt(),
+                (48 * density).toInt()
+            )
         }
 
-        val pauseBtn = Button(context).apply {
-            text = "إيقاف"
-            setBackgroundColor(0xFF2A2E36.toInt())
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = 11f
-            layoutParams = LinearLayout.LayoutParams(0, (36 * density).toInt(), 1f).apply {
-                marginEnd = (6 * density).toInt()
+        val details = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(
+                (12 * density).toInt(),
+                (10 * density).toInt(),
+                (12 * density).toInt(),
+                (10 * density).toInt()
+            )
+            background = roundedRect(0xF20B0D12.toInt(), 16f * density)
+            layoutParams = LinearLayout.LayoutParams(
+                (225 * density).toInt(),
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = (6 * density).toInt()
             }
         }
 
-        val stopBtn = Button(context).apply {
-            text = "STOP"
-            setBackgroundColor(0xFFB3261E.toInt())
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = 11f
-            layoutParams = LinearLayout.LayoutParams(0, (36 * density).toInt(), 1f)
+        val title = TextView(this).apply {
+            text = "RidePilot"
+            textSize = 13f
+            setTextColor(0xFFF5F7FA.toInt())
+            setTypeface(null, android.graphics.Typeface.BOLD)
         }
 
-        btnRow.addView(pauseBtn)
-        btnRow.addView(stopBtn)
+        val status = TextView(this).apply {
+            text = "جاهز"
+            textSize = 11f
+            setTextColor(0xFFB2B8C2.toInt())
+            setPadding(0, (5 * density).toInt(), 0, (8 * density).toInt())
+            maxLines = 3
+        }
 
-        bodyLayout.addView(statusBadge)
-        bodyLayout.addView(detailsText)
-        bodyLayout.addView(btnRow)
-        cardLayout.addView(bodyLayout)
-        bodyLayout.visibility = View.GONE
-        minimizeBtn.text = "＋"
-        root.addView(cardLayout)
+        val buttons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
 
-        // Touch listener for dragging anywhere on the overlay
-        root.setOnTouchListener { _, event ->
-            when (event.action) {
+        val pause = Button(this).apply {
+            text = "إيقاف"
+            textSize = 10f
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFF2A2E36.toInt())
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                (36 * density).toInt(),
+                1f
+            ).apply { marginEnd = (5 * density).toInt() }
+        }
+
+        val stop = Button(this).apply {
+            text = "STOP"
+            textSize = 10f
+            setTextColor(0xFFFFFFFF.toInt())
+            setBackgroundColor(0xFFB3261E.toInt())
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                (36 * density).toInt(),
+                1f
+            )
+        }
+
+        buttons.addView(pause)
+        buttons.addView(stop)
+        details.addView(title)
+        details.addView(status)
+        details.addView(buttons)
+        root.addView(bubble)
+        root.addView(details)
+
+        var startX = 0
+        var startY = 0
+        var touchX = 0f
+        var touchY = 0f
+        var moved = false
+
+        bubble.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    initialX = layoutParams!!.x
-                    initialY = layoutParams!!.y
-                    initialTouchX = event.rawX
-                    initialTouchY = event.rawY
+                    startX = layoutParams!!.x
+                    startY = layoutParams!!.y
+                    touchX = event.rawX
+                    touchY = event.rawY
+                    moved = false
                     true
                 }
+
                 MotionEvent.ACTION_MOVE -> {
-                    layoutParams!!.x = initialX + (event.rawX - initialTouchX).toInt()
-                    layoutParams!!.y = initialY + (event.rawY - initialTouchY).toInt()
-                    windowManager?.updateViewLayout(root, layoutParams)
+                    val dx = event.rawX - touchX
+                    val dy = event.rawY - touchY
+                    if (abs(dx) > 8f || abs(dy) > 8f) moved = true
+                    if (moved) {
+                        layoutParams!!.x = startX + dx.toInt()
+                        layoutParams!!.y = startY + dy.toInt()
+                        windowManager?.updateViewLayout(root, layoutParams)
+                    }
                     true
                 }
+
+                MotionEvent.ACTION_UP -> {
+                    if (!moved) {
+                        details.visibility = if (details.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+                    }
+                    true
+                }
+
                 else -> false
             }
         }
 
-        minimizeBtn.setOnClickListener {
-            isMinimized = !isMinimized
-            bodyLayout.visibility = if (isMinimized) View.GONE else View.VISIBLE
-            minimizeBtn.text = if (isMinimized) "＋" else "—"
-        }
-
-        closeBtn.setOnClickListener {
-            stopSelf()
-        }
-
-        pauseBtn.setOnClickListener {
+        pause.setOnClickListener {
             serviceScope.launch {
-                val app = RidePilotApplication.instance
-                app.settingsRepository.setAutomationEnabled(false)
-                statusBadge.text = "⏸ تم إيقاف الأتمتة مؤقتاً"
-                statusBadge.setTextColor(0xFFF59E0B.toInt())
+                RidePilotApplication.instance.settingsRepository.setAutomationEnabled(false)
+                status.text = "الأتمتة متوقفة"
             }
         }
 
-        stopBtn.setOnClickListener {
+        stop.setOnClickListener {
             serviceScope.launch {
-                val app = RidePilotApplication.instance
-                app.settingsRepository.setEmergencyStop(true)
+                RidePilotApplication.instance.settingsRepository.setEmergencyStop(true)
                 stopSelf()
             }
         }
 
-        overlayView = root
+        overlayRoot = root
         windowManager?.addView(root, layoutParams)
-    }
-
-    private fun observeLiveState() {
-        val root = overlayView ?: return
-        val card = (root as FrameLayout).getChildAt(0) as LinearLayout
-        val header = card.getChildAt(0) as LinearLayout
-        val titleText = header.getChildAt(0) as TextView
-        val body = card.getChildAt(1) as LinearLayout
-        val statusBadge = body.getChildAt(0) as TextView
-        val detailsText = body.getChildAt(1) as TextView
 
         serviceScope.launch {
             combine(
                 RidePilotAccessibilityService.activeTarget,
                 RidePilotAccessibilityService.latestUberAnalysis,
-                RidePilotAccessibilityService.latestInDriveParsed
-            ) { target, uber, inDrive -> Triple(target, uber, inDrive) }
-                .collect { (target, uber, inDrive) ->
-                    when (target) {
-                        AppTarget.UBER -> {
-                            if (uber == null) {
-                                titleText.text = "Uber • جاري القراءة"
-                                statusBadge.text = "Uber • جاري قراءة الطلب"
-                                statusBadge.setTextColor(0xFF5B9CFF.toInt())
-                                detailsText.text = "انتظر لحظة حتى تكتمل قراءة السعر والمسافات."
-                            } else {
-                                val good = uber.isPriceViable && uber.isInsideZone
-                                titleText.text = if (good) "Uber • ✓ مناسب" else "Uber • ✕ غير مناسب"
-                                titleText.setTextColor(if (good) 0xFF58C98D.toInt() else 0xFFFF6B6B.toInt())
-                                statusBadge.text = titleText.text
-                                statusBadge.setTextColor(if (good) 0xFF58C98D.toInt() else 0xFFFF6B6B.toInt())
-                                val offer = uber.offer
-                                detailsText.text = buildString {
-                                    append("${offer.displayedPrice ?: 0} ج.م")
-                                    append("  •  ${uber.totalPricingDistanceKm} كم")
-                                    append("\n${uber.pricePerKm} ج/كم  •  الحد ${uber.minRequiredPrice} ج")
-                                    if (!uber.isInsideZone) append("\nخارج منطقة العمل")
-                                }
+                RidePilotAccessibilityService.latestInDriveParsed,
+                RidePilotAccessibilityService.automationStatus
+            ) { target, uber, inDrive, message ->
+                OverlayState(target, uber, inDrive, message)
+            }.collect { state ->
+                when (state.target) {
+                    AppTarget.UBER -> {
+                        val good = state.uber?.let { it.isPriceViable && it.isInsideZone }
+                        bubble.text = "U"
+                        bubble.background = bubbleDrawable(
+                            when (good) {
+                                true -> 0xFF2E9D63.toInt()
+                                false -> 0xFFB3261E.toInt()
+                                null -> 0xFF3978D9.toInt()
                             }
+                        )
+                        title.text = when (good) {
+                            true -> "Uber • مناسب"
+                            false -> "Uber • غير مناسب"
+                            null -> "Uber • تحليل"
                         }
+                        status.text = state.uber?.let {
+                            "${it.offer.displayedPrice ?: "—"} ج • ${it.totalPricingDistanceKm} كم\n${it.pricePerKm} ج/كم • الحد ${it.minRequiredPrice} ج"
+                        } ?: state.message
+                    }
 
-                        AppTarget.INDRIVE -> {
-                            if (inDrive == null) {
-                                titleText.text = "inDrive • جاري القراءة"
-                                statusBadge.text = "inDrive • جاري القراءة"
-                                statusBadge.setTextColor(0xFF5B9CFF.toInt())
-                                detailsText.text = ""
-                            } else {
-                                val offline = inDrive.isOffline
-                                titleText.text = if (offline) "inDrive • غير متصل" else "inDrive • تلقائي"
-                                titleText.setTextColor(if (offline) 0xFF58C98D.toInt() else 0xFF5B9CFF.toInt())
-                                statusBadge.text = if (offline) "inDrive • غير متصل" else "inDrive • الحالة غير مقروءة نصياً"
-                                statusBadge.setTextColor(if (offline) 0xFF58C98D.toInt() else 0xFF5B9CFF.toInt())
-                                detailsText.text = buildString {
-                                    append(inDrive.screenType.name)
-                                    inDrive.activeOffer?.let { offer ->
-                                        append("\n${offer.displayedPrice ?: "—"} ج.م")
-                                        offer.tripDistanceKm?.let { append("  •  $it كم") }
-                                    }
-                                    if (inDrive.orderCards.isNotEmpty()) {
-                                        append("\nطلبات مرصودة: ${inDrive.orderCards.size}")
-                                    }
-                                }
-                            }
-                        }
+                    AppTarget.INDRIVE -> {
+                        bubble.text = "iD"
+                        bubble.background = bubbleDrawable(0xFF3978D9.toInt())
+                        title.text = "inDrive"
+                        status.text = state.message
+                    }
 
-                        null -> {
-                            titleText.text = "RidePilot • جاهز"
-                            titleText.setTextColor(0xFF5B9CFF.toInt())
-                            statusBadge.text = "RidePilot • جاهز"
-                            statusBadge.setTextColor(0xFF5B9CFF.toInt())
-                            detailsText.text = "افتح Uber أو inDrive."
-                        }
+                    null -> {
+                        bubble.text = "R"
+                        bubble.background = bubbleDrawable(0xFF3978D9.toInt())
+                        title.text = "RidePilot"
+                        status.text = "جاهز"
                     }
                 }
+            }
         }
     }
 
+    private fun bubbleDrawable(color: Int): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(color)
+            setStroke(2, 0x55FFFFFF)
+        }
+
+    private fun roundedRect(color: Int, radius: Float): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            cornerRadius = radius
+            setColor(color)
+            setStroke(1, 0x332A2E36)
+        }
+
+    private data class OverlayState(
+        val target: AppTarget?,
+        val uber: com.example.data.model.RideAnalysis?,
+        val inDrive: com.example.domain.parser.InDriveParser.InDriveParsedScreen?,
+        val message: String
+    )
 }
