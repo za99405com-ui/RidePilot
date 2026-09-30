@@ -117,38 +117,238 @@ fun ZonesScreen(
 
     var showCreateDialog by remember { mutableStateOf(false) }
     var zoneNameInput by remember { mutableStateOf("") }
-    var zoneKeywordsInput by remember { mutableStateOf("سيدي بشر,ميامي,العصافرة,سموحة") }
+    var zoneKeywordsInput by remember { mutableStateOf("") }
 
     val drawnPoints = remember { mutableStateListOf<GeoPoint>() }
     var mapViewInstance by remember { mutableStateOf<MapView?>(null) }
-    val drawMode = remember { mutableStateOf(false) }
+    var drawMode by remember { mutableStateOf(false) }
+    var selectionClosed by remember { mutableStateOf(false) }
 
-    fun redrawZoneSelection(mapView: MapView?, closed: Boolean = false) {
+    var currentLocation by remember { mutableStateOf<GeoPoint?>(null) }
+    var isLocating by remember { mutableStateOf(false) }
+    var locationMessage by remember { mutableStateOf<String?>(null) }
+    var autoRadiusKm by remember { mutableStateOf(3f) }
+    var locateAfterPermission by remember { mutableStateOf(false) }
+
+    var hasLocationPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val fusedLocationClient = remember(context) {
+        LocationServices.getFusedLocationProviderClient(context)
+    }
+
+    fun renderMap(mapView: MapView?) {
         if (mapView == null) return
-        mapView.overlays.removeAll { it is Polyline || it is Polygon }
 
-        if (drawnPoints.size >= 2 && !closed) {
+        // Rebuild visual overlays while preserving the touch/drawing overlay.
+        mapView.overlays.removeAll { it is Polygon || it is Polyline || it is Marker }
+
+        zones.forEach { zone ->
+            val points = ZoneEngine.parsePolygonJson(zone.polygonJson)
+                .map { GeoPoint(it.latitude, it.longitude) }
+
+            if (points.size >= 3) {
+                mapView.overlays.add(
+                    Polygon(mapView).apply {
+                        this.points = points
+                        title = zone.name
+                        fillPaint.color = if (zone.isEnabled) 0x2250D6A0 else 0x1675849A
+                        outlinePaint.color =
+                            if (zone.isEnabled) 0xFF50D6A0.toInt() else 0xFF75849A.toInt()
+                        outlinePaint.strokeWidth = if (zone.isEnabled) 4.5f else 3f
+                    }
+                )
+            }
+        }
+
+        if (drawnPoints.size >= 2 && !selectionClosed) {
             mapView.overlays.add(
                 Polyline(mapView).apply {
                     setPoints(drawnPoints.toList())
-                    outlinePaint.color = 0xFF5B9CFF.toInt()
+                    outlinePaint.color = 0xFF63A7FF.toInt()
                     outlinePaint.strokeWidth = 7f
                 }
             )
         }
 
-        if (drawnPoints.size >= 3 && closed) {
+        if (drawnPoints.size >= 3 && selectionClosed) {
             mapView.overlays.add(
                 Polygon(mapView).apply {
                     points = drawnPoints.toList()
-                    fillPaint.color = 0x335B9CFF
-                    outlinePaint.color = 0xFF5B9CFF.toInt()
+                    title = "الزون الجديدة"
+                    fillPaint.color = 0x3363A7FF
+                    outlinePaint.color = 0xFF63A7FF.toInt()
                     outlinePaint.strokeWidth = 6f
                 }
             )
         }
 
+        currentLocation?.let { point ->
+            mapView.overlays.add(
+                Marker(mapView).apply {
+                    position = point
+                    title = "موقعك الحالي"
+                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                }
+            )
+        }
+
         mapView.invalidate()
+    }
+
+    fun focusOn(point: GeoPoint, zoom: Double = 16.0) {
+        mapViewInstance?.let { mapView ->
+            mapView.controller.animateTo(point)
+            mapView.controller.setZoom(zoom)
+        }
+    }
+
+    fun focusZone(zone: WorkZone) {
+        val points = ZoneEngine.parsePolygonJson(zone.polygonJson)
+        if (points.isEmpty()) return
+        val center = GeoPoint(
+            points.map { it.latitude }.average(),
+            points.map { it.longitude }.average()
+        )
+        focusOn(center, if (points.size >= 20) 13.5 else 14.5)
+    }
+
+    @SuppressLint("MissingPermission")
+    fun locateNow() {
+        if (!hasLocationPermission) return
+
+        isLocating = true
+        locationMessage = "جار تحديد موقعك بدقة…"
+        val cancellation = CancellationTokenSource()
+
+        fusedLocationClient
+            .getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, cancellation.token)
+            .addOnSuccessListener { location ->
+                if (location != null) {
+                    currentLocation = GeoPoint(location.latitude, location.longitude)
+                    isLocating = false
+                    locationMessage = "تم تحديد موقعك"
+                    focusOn(currentLocation!!, 16.5)
+                    renderMap(mapViewInstance)
+                } else {
+                    fusedLocationClient.lastLocation
+                        .addOnSuccessListener { last ->
+                            isLocating = false
+                            if (last != null) {
+                                currentLocation = GeoPoint(last.latitude, last.longitude)
+                                locationMessage = "تم استخدام آخر موقع معروف"
+                                focusOn(currentLocation!!, 16.0)
+                                renderMap(mapViewInstance)
+                            } else {
+                                locationMessage = "تعذر تحديد الموقع — فعّل GPS وحاول مرة أخرى"
+                            }
+                        }
+                        .addOnFailureListener {
+                            isLocating = false
+                            locationMessage = "تعذر قراءة الموقع"
+                        }
+                }
+            }
+            .addOnFailureListener {
+                isLocating = false
+                locationMessage = "تعذر تحديد الموقع — حاول مرة أخرى"
+            }
+    }
+
+    val locationLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        hasLocationPermission =
+            results[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                results[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+
+        if (!hasLocationPermission) {
+            locateAfterPermission = false
+            locationMessage = "إذن الموقع مطلوب للتحديد التلقائي"
+        }
+    }
+
+    fun requestLocation() {
+        if (hasLocationPermission) {
+            locateNow()
+        } else {
+            locateAfterPermission = true
+            locationLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        }
+    }
+
+    fun createAutomaticZonePreview() {
+        val center = currentLocation
+        if (center == null) {
+            locationMessage = "حدد موقعك أولًا ثم اضغط التحديد التلقائي"
+            requestLocation()
+            return
+        }
+
+        val generated = ZoneEngine.createCirclePolygon(
+            center = LatLngPoint(center.latitude, center.longitude),
+            radiusKm = autoRadiusKm.toDouble(),
+            segments = 48
+        )
+
+        drawnPoints.clear()
+        drawnPoints.addAll(generated.map { GeoPoint(it.latitude, it.longitude) })
+        drawMode = false
+        selectionClosed = true
+
+        if (zoneNameInput.isBlank()) {
+            zoneNameInput = String.format(Locale.US, "حول موقعي %.1f كم", autoRadiusKm)
+        }
+
+        val zoom = when {
+            autoRadiusKm <= 1f -> 15.3
+            autoRadiusKm <= 3f -> 14.2
+            autoRadiusKm <= 7f -> 12.8
+            else -> 11.5
+        }
+
+        focusOn(center, zoom)
+        renderMap(mapViewInstance)
+        locationMessage = "تم إنشاء Zone تلقائيًا حول موقعك"
+    }
+
+    LaunchedEffect(hasLocationPermission, locateAfterPermission) {
+        if (hasLocationPermission && locateAfterPermission) {
+            locateAfterPermission = false
+            locateNow()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (hasLocationPermission) {
+            locateNow()
+        }
+    }
+
+    LaunchedEffect(zones) {
+        renderMap(mapViewInstance)
+    }
+
+    DisposableEffect(mapViewInstance) {
+        mapViewInstance?.onResume()
+        onDispose {
+            mapViewInstance?.onPause()
+        }
     }
 
     Scaffold(
