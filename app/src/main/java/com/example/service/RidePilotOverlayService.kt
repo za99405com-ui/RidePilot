@@ -50,7 +50,7 @@ class RidePilotOverlayService : Service() {
     private var initialY = 0
     private var initialTouchX = 0f
     private var initialTouchY = 0f
-    private var isMinimized = false
+    private var isMinimized = true
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -119,8 +119,8 @@ class RidePilotOverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 30
-            y = 200
+            x = 12
+            y = 70
         }
 
         val context = this
@@ -134,7 +134,7 @@ class RidePilotOverlayService : Service() {
             setPadding((14 * density).toInt(), (10 * density).toInt(), (14 * density).toInt(), (10 * density).toInt())
             setBackgroundColor(0xF20B0D12.toInt())
             elevation = 12f
-            layoutParams = FrameLayout.LayoutParams((255 * density).toInt(), FrameLayout.LayoutParams.WRAP_CONTENT)
+            layoutParams = FrameLayout.LayoutParams((190 * density).toInt(), FrameLayout.LayoutParams.WRAP_CONTENT)
         }
 
         // Header with App Title, Minimize and Drag Handle
@@ -223,6 +223,8 @@ class RidePilotOverlayService : Service() {
         bodyLayout.addView(detailsText)
         bodyLayout.addView(btnRow)
         cardLayout.addView(bodyLayout)
+        bodyLayout.visibility = View.GONE
+        minimizeBtn.text = "＋"
         root.addView(cardLayout)
 
         // Touch listener for dragging anywhere on the overlay
@@ -279,6 +281,8 @@ class RidePilotOverlayService : Service() {
     private fun observeLiveState() {
         val root = overlayView ?: return
         val card = (root as FrameLayout).getChildAt(0) as LinearLayout
+        val header = card.getChildAt(0) as LinearLayout
+        val titleText = header.getChildAt(0) as TextView
         val body = card.getChildAt(1) as LinearLayout
         val statusBadge = body.getChildAt(0) as TextView
         val detailsText = body.getChildAt(1) as TextView
@@ -293,12 +297,15 @@ class RidePilotOverlayService : Service() {
                     when (target) {
                         AppTarget.UBER -> {
                             if (uber == null) {
+                                titleText.text = "Uber • جاري القراءة"
                                 statusBadge.text = "Uber • جاري قراءة الطلب"
                                 statusBadge.setTextColor(0xFF5B9CFF.toInt())
                                 detailsText.text = "انتظر لحظة حتى تكتمل قراءة السعر والمسافات."
                             } else {
                                 val good = uber.isPriceViable && uber.isInsideZone
-                                statusBadge.text = if (good) "Uber • ✓ مناسب" else "Uber • ✕ غير مناسب"
+                                titleText.text = if (good) "Uber • ✓ مناسب" else "Uber • ✕ غير مناسب"
+                                titleText.setTextColor(if (good) 0xFF58C98D.toInt() else 0xFFFF6B6B.toInt())
+                                statusBadge.text = titleText.text
                                 statusBadge.setTextColor(if (good) 0xFF58C98D.toInt() else 0xFFFF6B6B.toInt())
                                 val offer = uber.offer
                                 detailsText.text = buildString {
@@ -312,13 +319,16 @@ class RidePilotOverlayService : Service() {
 
                         AppTarget.INDRIVE -> {
                             if (inDrive == null) {
+                                titleText.text = "inDrive • جاري القراءة"
                                 statusBadge.text = "inDrive • جاري القراءة"
                                 statusBadge.setTextColor(0xFF5B9CFF.toInt())
                                 detailsText.text = ""
                             } else {
                                 val offline = inDrive.isOffline
-                                statusBadge.text = if (offline) "inDrive • غير متصل" else "inDrive • تحقق من الحالة"
-                                statusBadge.setTextColor(if (offline) 0xFF58C98D.toInt() else 0xFFFFB84D.toInt())
+                                titleText.text = if (offline) "inDrive • غير متصل" else "inDrive • تلقائي"
+                                titleText.setTextColor(if (offline) 0xFF58C98D.toInt() else 0xFF5B9CFF.toInt())
+                                statusBadge.text = if (offline) "inDrive • غير متصل" else "inDrive • الحالة غير مقروءة نصياً"
+                                statusBadge.setTextColor(if (offline) 0xFF58C98D.toInt() else 0xFF5B9CFF.toInt())
                                 detailsText.text = buildString {
                                     append(inDrive.screenType.name)
                                     inDrive.activeOffer?.let { offer ->
@@ -333,6 +343,8 @@ class RidePilotOverlayService : Service() {
                         }
 
                         null -> {
+                            titleText.text = "RidePilot • جاهز"
+                            titleText.setTextColor(0xFF5B9CFF.toInt())
                             statusBadge.text = "RidePilot • جاهز"
                             statusBadge.setTextColor(0xFF5B9CFF.toInt())
                             detailsText.text = "افتح Uber أو inDrive."
