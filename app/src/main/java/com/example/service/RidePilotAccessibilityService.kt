@@ -5,8 +5,10 @@ import android.accessibilityservice.GestureDescription
 import android.content.Intent
 import android.graphics.Path
 import android.os.Build
+import android.os.Bundle
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import com.example.RidePilotApplication
 import com.example.data.model.AppLogEntry
 import com.example.data.model.AppTarget
@@ -34,6 +36,8 @@ class RidePilotAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "RidePilotAccService"
+        private const val UBER_DRIVER_PACKAGE = "com.ubercab.driver"
+        private const val INDRIVE_PACKAGE = "sinet.startup.inDriver"
 
         private val _isServiceConnected = MutableStateFlow(false)
         val isServiceConnected: StateFlow<Boolean> = _isServiceConnected.asStateFlow()
@@ -115,7 +119,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
         val rootNode = rootInActiveWindow ?: return
 
         // 1. Detect Uber
-        if (packageName.contains("uber", ignoreCase = true)) {
+        if (packageName == UBER_DRIVER_PACKAGE) {
             val nodes = UberParser.extractNodes(rootNode)
             val offer = UberParser.parseUberScreen(nodes)
 
@@ -126,13 +130,54 @@ class RidePilotAccessibilityService : AccessibilityService() {
                 val distMode = app.settingsRepository.pricingDistanceMode.first()
                 val zoneMode = app.settingsRepository.zoneVerificationMode.first()
 
-                // Calculate pricing distance
-                val pricingDistance = when (distMode) {
-                    PricingDistanceMode.TRIP_ONLY -> offer.tripDistanceKm ?: 5.0
-                    PricingDistanceMode.PICKUP_PLUS_TRIP -> (offer.pickupDistanceKm ?: 0.0) + (offer.tripDistanceKm ?: 5.0)
+                // Calculate only from values actually read from the Uber card.
+                val pricingDistance: Double? = when (distMode) {
+                    PricingDistanceMode.TRIP_ONLY -> offer.tripDistanceKm
+                    PricingDistanceMode.PICKUP_PLUS_TRIP -> {
+                        val pickup = offer.pickupDistanceKm
+                        val trip = offer.tripDistanceKm
+                        if (pickup != null && trip != null) pickup + trip else null
+                    }
+                }
+
+                val displayedPrice = offer.displayedPrice
+                if (pricingDistance == null || pricingDistance <= 0.0 || displayedPrice == null || displayedPrice <= 0.0) {
+                    _latestUberAnalysis.value = null
+                    app.logRepository.log(
+                        AppLogEntry(
+                            app = AppTarget.UBER,
+                            screen = "OfferOverlay",
+                            detectedPrice = displayedPrice,
+                            detectedDistance = pricingDistance,
+                            zoneResult = "Unknown",
+                            minCalculated = null,
+                            action = "SKIP_INCOMPLETE_DATA",
+                            reason = "تعذر قراءة السعر أو المسافة المطلوبة؛ لم يتم استخدام أي قيمة افتراضية",
+                            confidence = offer.confidence
+                        )
+                    )
+                    return
                 }
 
                 val calc = PricingEngine.calculateMinimumPrice(pricingDistance, bands)
+                if (!calc.isValid) {
+                    _latestUberAnalysis.value = null
+                    app.logRepository.log(
+                        AppLogEntry(
+                            app = AppTarget.UBER,
+                            screen = "OfferOverlay",
+                            detectedPrice = displayedPrice,
+                            detectedDistance = pricingDistance,
+                            zoneResult = "Unknown",
+                            minCalculated = null,
+                            action = "SKIP_INVALID_PRICING",
+                            reason = calc.explanation,
+                            confidence = offer.confidence
+                        )
+                    )
+                    return
+                }
+
                 val zoneRes = ZoneEngine.evaluateOffer(
                     context = applicationContext,
                     pickupAddress = offer.pickupAddress,
@@ -141,7 +186,24 @@ class RidePilotAccessibilityService : AccessibilityService() {
                     mode = zoneMode
                 )
 
-                val displayedPrice = offer.displayedPrice ?: 0.0
+                if (!zoneRes.isConclusive) {
+                    _latestUberAnalysis.value = null
+                    app.logRepository.log(
+                        AppLogEntry(
+                            app = AppTarget.UBER,
+                            screen = "OfferOverlay",
+                            detectedPrice = displayedPrice,
+                            detectedDistance = pricingDistance,
+                            zoneResult = zoneRes.reason,
+                            minCalculated = calc.minimumPrice,
+                            action = "SKIP_ZONE_UNCERTAIN",
+                            reason = zoneRes.reason,
+                            confidence = offer.confidence
+                        )
+                    )
+                    return
+                }
+
                 val isPriceViable = displayedPrice >= calc.minimumPrice
 
                 val analysis = RideAnalysis(
@@ -185,7 +247,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
         }
 
         // 2. Detect inDrive
-        else if (packageName.contains("indriver", ignoreCase = true) || packageName.contains("inDriver", ignoreCase = true)) {
+        else if (packageName == INDRIVE_PACKAGE) {
             val parsedScreen = InDriveParser.parseScreen(rootNode)
             _latestInDriveParsed.value = parsedScreen
             if (parsedScreen.activeOffer != null) {
@@ -262,6 +324,17 @@ class RidePilotAccessibilityService : AccessibilityService() {
                             cont.resume(false)
                         }
                     }, null)
+                }
+
+                is InDriveStateMachine.GestureAction.SetText -> {
+                    val args = Bundle().apply {
+                        putCharSequence(
+                            AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                            action.text
+                        )
+                    }
+                    val ok = action.node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                    cont.resume(ok)
                 }
 
                 is InDriveStateMachine.GestureAction.Back -> {
