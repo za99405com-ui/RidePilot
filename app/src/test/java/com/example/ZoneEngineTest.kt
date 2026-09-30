@@ -33,6 +33,24 @@ class ZoneEngineTest {
     }
 
     @Test
+    fun testAutomaticCirclePolygonContainsCenter() {
+        val center = LatLngPoint(31.2200, 29.9500)
+        val polygon = ZoneEngine.createCirclePolygon(center, radiusKm = 3.0)
+
+        assertTrue(polygon.size >= 24)
+        assertTrue(ZoneEngine.isPointInPolygon(center, polygon))
+    }
+
+    @Test
+    fun testAutomaticCirclePolygonRejectsFarPoint() {
+        val center = LatLngPoint(31.2200, 29.9500)
+        val polygon = ZoneEngine.createCirclePolygon(center, radiusKm = 3.0)
+        val farPoint = LatLngPoint(31.3200, 30.0500)
+
+        assertFalse(ZoneEngine.isPointInPolygon(farPoint, polygon))
+    }
+
+    @Test
     fun testKeywordMatchingFallback() {
         val zone = WorkZone(
             name = "المنتزه",
