@@ -67,6 +67,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
     private val debounceMs = 25L
     private val processing = AtomicBoolean(false)
     private val pendingRecheck = AtomicBoolean(false)
+    private val passiveRecheckScheduled = AtomicBoolean(false)
     private val postGestureRecheckToken = AtomicInteger(0)
 
     private val stateMachine by lazy {
@@ -182,6 +183,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
             _latestUberAnalysis.value = null
             _automationStatus.value = "Uber: جاري قراءة الطلب"
             ensureOverlayRunning()
+            schedulePassiveRecheck(140L)
             return
         }
 
@@ -217,6 +219,18 @@ class RidePilotAccessibilityService : AccessibilityService() {
         )
 
         ensureOverlayRunning()
+
+        // Accessibility events are not guaranteed for every inDrive animation.
+        // Keep a lightweight read loop only while automation is active and inDrive
+        // is visible so the next state is picked up without the user touching the app.
+        if (automationEnabled && !emergencyStop) {
+            val nextDelay = when (parsedScreen.screenType) {
+                InDriveParser.InDriveScreenType.WAITING_RESPONSE -> 320L
+                InDriveParser.InDriveScreenType.COUNTER_OFFER_INPUT -> 140L
+                else -> 220L
+            }
+            schedulePassiveRecheck(nextDelay)
+        }
     }
 
     private suspend fun processUberOffer(app: RidePilotApplication, offer: RideOffer) {
@@ -330,6 +344,16 @@ class RidePilotAccessibilityService : AccessibilityService() {
 
     private fun findRootForPackage(packageName: String): AccessibilityNodeInfo? =
         findRootsForPackage(packageName).firstOrNull()
+
+    private fun schedulePassiveRecheck(delayMs: Long) {
+        if (!passiveRecheckScheduled.compareAndSet(false, true)) return
+
+        serviceScope.launch {
+            delay(delayMs)
+            passiveRecheckScheduled.set(false)
+            requestWindowProcessing()
+        }
+    }
 
     private fun schedulePostGestureRechecks() {
         val token = postGestureRecheckToken.incrementAndGet()
