@@ -11,6 +11,15 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import org.json.JSONObject
+import org.locationtech.jts.geom.Coordinate
+import org.locationtech.jts.geom.Geometry
+import org.locationtech.jts.geom.GeometryCollection
+import org.locationtech.jts.geom.GeometryFactory
+import org.locationtech.jts.geom.MultiPolygon
+import org.locationtech.jts.geom.Polygon
+import org.locationtech.jts.operation.union.UnaryUnionOp
+import org.locationtech.jts.simplify.TopologyPreservingSimplifier
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
@@ -92,22 +101,151 @@ object ZoneEngine {
     }
 
     /**
-     * Parse polygon points from JSON string.
+     * Parses both the legacy single-polygon JSON and the newer multi-polygon JSON.
+     *
+     * Legacy:
+     *   [ {lat/lng...}, {lat/lng...} ]
+     *
+     * Multi:
+     *   [ [ {lat/lng...}, ... ], [ {lat/lng...}, ... ] ]
      */
-    fun parsePolygonJson(json: String): List<LatLngPoint> {
+    fun parsePolygonGroups(json: String): List<List<LatLngPoint>> {
+        return try {
+            val root = JSONArray(json)
+            if (root.length() == 0) return emptyList()
+
+            val first = root.opt(0)
+            if (first is JSONObject) {
+                listOf(parsePointArray(root))
+            } else {
+                buildList {
+                    for (i in 0 until root.length()) {
+                        val group = root.optJSONArray(i) ?: continue
+                        val points = parsePointArray(group)
+                        if (points.size >= 3) add(points)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun parsePolygonJson(json: String): List<LatLngPoint> =
+        parsePolygonGroups(json).firstOrNull().orEmpty()
+
+    fun serializePolygonGroups(groups: List<List<LatLngPoint>>): String {
+        val cleanGroups = groups.filter { it.size >= 3 }
+        if (cleanGroups.size == 1) {
+            return pointArrayToJson(cleanGroups.first()).toString()
+        }
+
+        val root = JSONArray()
+        cleanGroups.forEach { root.put(pointArrayToJson(it)) }
+        return root.toString()
+    }
+
+    fun isPointInPolygonGroups(
+        point: LatLngPoint,
+        groups: List<List<LatLngPoint>>
+    ): Boolean = groups.any { it.size >= 3 && isPointInPolygon(point, it) }
+
+    /**
+     * Geometric union used by the UI's "دمج" action.
+     * Adjacent/overlapping areas become one outline. Truly separated areas remain
+     * multiple polygon parts but are still stored as one WorkZone.
+     */
+    fun mergePolygonGroups(groups: List<List<LatLngPoint>>): List<List<LatLngPoint>> {
+        val geometryFactory = GeometryFactory()
+        val polygons = groups.mapNotNull { points ->
+            if (points.size < 3) return@mapNotNull null
+
+            val coordinates = points.map {
+                Coordinate(it.longitude, it.latitude)
+            }.toMutableList()
+
+            if (
+                coordinates.first().x != coordinates.last().x ||
+                coordinates.first().y != coordinates.last().y
+            ) {
+                coordinates.add(Coordinate(coordinates.first()))
+            }
+
+            try {
+                geometryFactory.createPolygon(coordinates.toTypedArray()).let { polygon ->
+                    if (polygon.isValid) polygon else polygon.buffer(0.0)
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        if (polygons.isEmpty()) return emptyList()
+
+        return try {
+            val unioned = UnaryUnionOp.union(polygons)
+            val simplified = TopologyPreservingSimplifier.simplify(unioned, 0.00003)
+            geometryToPolygonGroups(simplified)
+        } catch (_: Exception) {
+            groups
+        }
+    }
+
+    private fun parsePointArray(arr: JSONArray): List<LatLngPoint> {
         val points = mutableListOf<LatLngPoint>()
-        try {
-            val arr = JSONArray(json)
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val lat = obj.optDouble("latitude", obj.optDouble("lat", 0.0))
-                val lng = obj.optDouble("longitude", obj.optDouble("lng", 0.0))
+        for (i in 0 until arr.length()) {
+            val obj = arr.optJSONObject(i) ?: continue
+            val lat = obj.optDouble("latitude", obj.optDouble("lat", Double.NaN))
+            val lng = obj.optDouble("longitude", obj.optDouble("lng", Double.NaN))
+            if (!lat.isNaN() && !lng.isNaN()) {
                 points.add(LatLngPoint(lat, lng))
             }
-        } catch (e: Exception) {
-            // fallback empty
         }
         return points
+    }
+
+    private fun pointArrayToJson(points: List<LatLngPoint>): JSONArray {
+        val arr = JSONArray()
+        points.forEach { point ->
+            arr.put(
+                JSONObject()
+                    .put("latitude", point.latitude)
+                    .put("longitude", point.longitude)
+            )
+        }
+        return arr
+    }
+
+    private fun geometryToPolygonGroups(geometry: Geometry): List<List<LatLngPoint>> {
+        val result = mutableListOf<List<LatLngPoint>>()
+
+        fun addPolygon(polygon: Polygon) {
+            val coords = polygon.exteriorRing.coordinates
+            if (coords.size < 4) return
+
+            val points = coords
+                .dropLast(1)
+                .map { LatLngPoint(it.y, it.x) }
+
+            if (points.size >= 3) result.add(points)
+        }
+
+        when (geometry) {
+            is Polygon -> addPolygon(geometry)
+            is MultiPolygon -> {
+                for (i in 0 until geometry.numGeometries) {
+                    val polygon = geometry.getGeometryN(i) as? Polygon ?: continue
+                    addPolygon(polygon)
+                }
+            }
+            is GeometryCollection -> {
+                for (i in 0 until geometry.numGeometries) {
+                    result.addAll(geometryToPolygonGroups(geometry.getGeometryN(i)))
+                }
+            }
+        }
+
+        return result
     }
 
     /**
@@ -218,17 +356,19 @@ object ZoneEngine {
             ZoneVerificationMode.BOTH_PICKUP_AND_DESTINATION -> pickupConclusive && destinationConclusive
         }
 
-        // Check each zone
+        // Check each zone. One WorkZone may contain multiple merged polygon parts.
         for (zone in enabledZones) {
-            val polygon = parsePolygonJson(zone.polygonJson)
+            val polygonGroups = parsePolygonGroups(zone.polygonJson)
 
             val pickupOk = when {
-                pickupPoint != null && polygon.size >= 3 -> isPointInPolygon(pickupPoint, polygon)
+                pickupPoint != null && polygonGroups.isNotEmpty() ->
+                    isPointInPolygonGroups(pickupPoint, polygonGroups)
                 else -> matchesKeywords(pickupAddress, zone)
             }
 
             val destOk = when {
-                destPoint != null && polygon.size >= 3 -> isPointInPolygon(destPoint, polygon)
+                destPoint != null && polygonGroups.isNotEmpty() ->
+                    isPointInPolygonGroups(destPoint, polygonGroups)
                 else -> matchesKeywords(destinationAddress, zone)
             }
 
