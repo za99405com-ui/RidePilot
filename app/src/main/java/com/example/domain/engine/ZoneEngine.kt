@@ -132,6 +132,28 @@ object ZoneEngine {
             )
         }
 
+        // Fast path: explicit zone keywords can often decide the ride immediately
+        // without waiting for Android Geocoder.
+        for (zone in enabledZones) {
+            if (zone.allowedKeywords.isBlank()) continue
+            val pickupKeywordOk = matchesKeywords(pickupAddress, zone)
+            val destinationKeywordOk = matchesKeywords(destinationAddress, zone)
+            val allowedByKeywords = when (mode) {
+                ZoneVerificationMode.PICKUP_ONLY -> pickupKeywordOk
+                ZoneVerificationMode.DESTINATION_ONLY -> destinationKeywordOk
+                ZoneVerificationMode.BOTH_PICKUP_AND_DESTINATION -> pickupKeywordOk && destinationKeywordOk
+            }
+            if (allowedByKeywords) {
+                return ZoneCheckResult(
+                    isAllowed = true,
+                    matchedZone = zone,
+                    pickupInside = pickupKeywordOk,
+                    destinationInside = destinationKeywordOk,
+                    reason = "✅ داخل منطقة [${zone.name}] حسب الكلمات المفتاحية"
+                )
+            }
+        }
+
         val pickupPoint = geocodeAddress(context, pickupAddress)
         val destPoint = geocodeAddress(context, destinationAddress)
 
