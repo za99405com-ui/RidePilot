@@ -255,7 +255,7 @@ fun ZonesScreen(navController: NavController) {
             editable.forEachIndexed { pointIndex, point ->
                 val marker = Marker(mapView).apply {
                     position = point
-                    title = "نقطة \${pointIndex + 1}"
+                    title = "نقطة ${pointIndex + 1}"
                     isDraggable = true
                     setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
                 }
@@ -308,7 +308,7 @@ fun ZonesScreen(navController: NavController) {
         val result = AreaBoundaryResolver.resolve(point.latitude, point.longitude)
         result.onSuccess { area ->
             if (area.osmKey in selectedAreaIds) {
-                mapMessage = "منطقة «\${area.name}» محددة بالفعل"
+                mapMessage = "منطقة «${area.name}» محددة بالفعل"
                 return@onSuccess
             }
 
@@ -325,7 +325,7 @@ fun ZonesScreen(navController: NavController) {
             selectedNames.add(area.name)
             previewGroups.addAll(groups)
             updateAutoName()
-            mapMessage = "تم تحديد «\${area.name}» • اختر منطقة أخرى أو اضغط دمج"
+            mapMessage = "تم تحديد «${area.name}» • اختر منطقة أخرى أو اضغط دمج"
             renderMap(mapViewInstance)
             focusGroups(groups, 13.8)
         }.onFailure {
@@ -451,7 +451,7 @@ fun ZonesScreen(navController: NavController) {
         mapMessage = if (previewGroups.size == 1) {
             "تم دمج المناطق في حد واحد"
         } else {
-            "تم دمج المناطق كـ Zone واحدة من \${previewGroups.size} أجزاء"
+            "تم دمج المناطق كـ Zone واحدة من ${previewGroups.size} أجزاء"
         }
         renderMap(mapViewInstance)
         focusGroups(previewGroups.toList(), 13.2)
@@ -505,7 +505,7 @@ fun ZonesScreen(navController: NavController) {
         previewGroups.addAll(groups)
         selectedNames.add(zone.name)
         mapMode = ZoneMapMode.EDIT
-        mapMessage = "تعديل «\${zone.name}» • اسحب النقاط ثم احفظ"
+        mapMessage = "تعديل «${zone.name}» • اسحب النقاط ثم احفظ"
         focusGroups(groups, 13.8)
         renderMap(mapViewInstance)
     }
@@ -798,12 +798,12 @@ fun ZonesScreen(navController: NavController) {
                                             editingGroupIndex =
                                                 (editingGroupIndex + 1) % previewGroups.size
                                             mapMessage =
-                                                "تعديل الجزء \${editingGroupIndex + 1} من \${previewGroups.size}"
+                                                "تعديل الجزء ${editingGroupIndex + 1} من ${previewGroups.size}"
                                             renderMap(mapViewInstance)
                                         }
                                     ) {
                                         Text(
-                                            "\${editingGroupIndex + 1}/\${previewGroups.size}",
+                                            "${editingGroupIndex + 1}/${previewGroups.size}",
                                             color = AmberAccent,
                                             fontSize = 10.sp
                                         )
@@ -887,7 +887,7 @@ fun ZonesScreen(navController: NavController) {
                                 if (selectedNames.isEmpty())
                                     "يتعرف على المنطقة وحدودها تلقائيًا من الخريطة"
                                 else
-                                    "المحدد: \${selectedNames.distinct().joinToString(" • ")}",
+                                    "المحدد: ${selectedNames.distinct().joinToString(" • ")}",
                                 color = TextSecondary,
                                 fontSize = 10.sp,
                                 maxLines = 2
@@ -947,7 +947,7 @@ fun ZonesScreen(navController: NavController) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "المناطق المحفوظة (\${zones.size})",
+                    "المناطق المحفوظة (${zones.size})",
                     color = TextPrimary,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold
@@ -1035,9 +1035,9 @@ fun ZonesScreen(navController: NavController) {
                                         )
                                         Text(
                                             if (groups.size <= 1)
-                                                "\${pointCount} نقطة حدود"
+                                                "${pointCount} نقطة حدود"
                                             else
-                                                "\${groups.size} أجزاء • \${pointCount} نقطة",
+                                                "${groups.size} أجزاء • ${pointCount} نقطة",
                                             color = TextSecondary,
                                             fontSize = 10.sp
                                         )
@@ -1084,7 +1084,7 @@ fun ZonesScreen(navController: NavController) {
 
                             if (zone.allowedKeywords.isNotBlank()) {
                                 Text(
-                                    "المناطق: \${zone.allowedKeywords}",
+                                    "المناطق: ${zone.allowedKeywords}",
                                     color = TextMuted,
                                     fontSize = 9.sp,
                                     maxLines = 2
@@ -1109,7 +1109,7 @@ fun ZonesScreen(navController: NavController) {
             text = {
                 Column {
                     Text(
-                        "الحدود: \${previewGroups.size} جزء • \${previewGroups.sumOf { it.size }} نقطة",
+                        "الحدود: ${previewGroups.size} جزء • ${previewGroups.sumOf { it.size }} نقطة",
                         color = SuccessGreen,
                         fontSize = 11.sp
                     )
