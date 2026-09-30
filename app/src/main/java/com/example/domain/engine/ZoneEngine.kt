@@ -31,6 +31,41 @@ object ZoneEngine {
     )
 
     /**
+     * Creates an approximately circular polygon around a center point.
+     *
+     * The stored WorkZone format is polygon-based, so automatic zones can use this
+     * without a database migration. Radius is expressed in kilometers.
+     */
+    fun createCirclePolygon(
+        center: LatLngPoint,
+        radiusKm: Double,
+        segments: Int = 48
+    ): List<LatLngPoint> {
+        val safeRadius = radiusKm.coerceAtLeast(0.1)
+        val safeSegments = segments.coerceIn(12, 120)
+        val earthRadiusKm = 6371.0088
+        val angularDistance = safeRadius / earthRadiusKm
+        val lat1 = Math.toRadians(center.latitude)
+        val lon1 = Math.toRadians(center.longitude)
+
+        return (0 until safeSegments).map { index ->
+            val bearing = 2.0 * Math.PI * index / safeSegments
+            val lat2 = kotlin.math.asin(
+                kotlin.math.sin(lat1) * kotlin.math.cos(angularDistance) +
+                    kotlin.math.cos(lat1) * kotlin.math.sin(angularDistance) * kotlin.math.cos(bearing)
+            )
+            val lon2 = lon1 + kotlin.math.atan2(
+                kotlin.math.sin(bearing) * kotlin.math.sin(angularDistance) * kotlin.math.cos(lat1),
+                kotlin.math.cos(angularDistance) - kotlin.math.sin(lat1) * kotlin.math.sin(lat2)
+            )
+            LatLngPoint(
+                latitude = Math.toDegrees(lat2),
+                longitude = Math.toDegrees(lon2)
+            )
+        }
+    }
+
+    /**
      * Checks if a point (lat, lng) lies inside a polygon using the Ray-Casting algorithm.
      */
     fun isPointInPolygon(point: LatLngPoint, polygon: List<LatLngPoint>): Boolean {
