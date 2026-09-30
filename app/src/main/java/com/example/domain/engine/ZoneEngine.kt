@@ -22,7 +22,8 @@ object ZoneEngine {
         val matchedZone: WorkZone?,
         val pickupInside: Boolean,
         val destinationInside: Boolean,
-        val reason: String
+        val reason: String,
+        val isConclusive: Boolean = true
     )
 
     /**
@@ -134,6 +135,20 @@ object ZoneEngine {
         val pickupPoint = geocodeAddress(context, pickupAddress)
         val destPoint = geocodeAddress(context, destinationAddress)
 
+        // A failed geocode must not be treated as "outside the zone".
+        // Keyword fallback is considered authoritative only when every active zone
+        // has configured keywords for the required address.
+        val pickupConclusive = pickupPoint != null ||
+            (!pickupAddress.isNullOrBlank() && enabledZones.all { it.allowedKeywords.isNotBlank() })
+        val destinationConclusive = destPoint != null ||
+            (!destinationAddress.isNullOrBlank() && enabledZones.all { it.allowedKeywords.isNotBlank() })
+
+        val requiredDataConclusive = when (mode) {
+            ZoneVerificationMode.PICKUP_ONLY -> pickupConclusive
+            ZoneVerificationMode.DESTINATION_ONLY -> destinationConclusive
+            ZoneVerificationMode.BOTH_PICKUP_AND_DESTINATION -> pickupConclusive && destinationConclusive
+        }
+
         // Check each zone
         for (zone in enabledZones) {
             val polygon = parsePolygonJson(zone.polygonJson)
@@ -170,6 +185,17 @@ object ZoneEngine {
             }
         }
 
+        if (!requiredDataConclusive) {
+            return ZoneCheckResult(
+                isAllowed = false,
+                matchedZone = null,
+                pickupInside = false,
+                destinationInside = false,
+                reason = "⚠️ تعذر التحقق من الـZone بشكل موثوق (عنوان أو Geocoding غير متاح)",
+                isConclusive = false
+            )
+        }
+
         val failReason = when (mode) {
             ZoneVerificationMode.PICKUP_ONLY -> "❌ نقطة الركوب خارج مناطق العمل المفعلة"
             ZoneVerificationMode.DESTINATION_ONLY -> "❌ الوجهة خارج مناطق العمل المفعلة"
@@ -181,7 +207,8 @@ object ZoneEngine {
             matchedZone = null,
             pickupInside = false,
             destinationInside = false,
-            reason = failReason
+            reason = failReason,
+            isConclusive = true
         )
     }
 }
