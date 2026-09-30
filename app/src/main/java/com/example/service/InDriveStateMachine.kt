@@ -31,6 +31,7 @@ class InDriveStateMachine(
     sealed class GestureAction {
         data class Tap(val x: Float, val y: Float) : GestureAction()
         data class Swipe(val startX: Float, val startY: Float, val endX: Float, val endY: Float, val durationMs: Long = 300) : GestureAction()
+        data class ClickNode(val node: AccessibilityNodeInfo) : GestureAction()
         data class SetText(val node: AccessibilityNodeInfo, val text: String) : GestureAction()
         object Back : GestureAction()
     }
@@ -102,11 +103,15 @@ class InDriveStateMachine(
 
         when (parsed.screenType) {
             InDriveParser.InDriveScreenType.REQUESTS_LIST -> {
-                if (parsed.offlineButtonBounds == null || !parsed.isOffline) {
+                // Some inDrive builds draw the "غير متصل" label in a way Accessibility
+                // cannot expose. If "متصل" was explicitly detected, the global guard
+                // above already switched it back. Otherwise, allow request handling
+                // without blocking on an unreadable status label.
+                if (parsed.offlineButtonBounds != null && !parsed.isOffline) {
                     _currentState.value = AutomationState.ERROR_RECOVERY
                     logger(
-                        "REQUESTS_STATUS_UNVERIFIED",
-                        "في صفحة الطلبات لازم أتأكد إن inDrive غير متصل قبل التحكم؛ لن يتم تنفيذ شيء الآن",
+                        "REQUESTS_ONLINE",
+                        "تم رصد حالة متصل بشكل صريح؛ لن يتم التحكم قبل الرجوع لعدم الاتصال",
                         null,
                         null,
                         parsed.confidence
@@ -144,7 +149,14 @@ class InDriveStateMachine(
                                 card.distanceKm,
                                 parsed.confidence
                             )
-                            gestureDispatcher(GestureAction.Tap(card.bounds.exactCenterX(), card.bounds.exactCenterY()))
+                            val opened = if (card.node != null) {
+                                gestureDispatcher(GestureAction.ClickNode(card.node))
+                            } else {
+                                false
+                            }
+                            if (!opened) {
+                                gestureDispatcher(GestureAction.Tap(card.bounds.exactCenterX(), card.bounds.exactCenterY()))
+                            }
                             return
                         }
 
@@ -174,7 +186,14 @@ class InDriveStateMachine(
                             card.distanceKm,
                             parsed.confidence
                         )
-                        gestureDispatcher(GestureAction.Tap(card.bounds.exactCenterX(), card.bounds.exactCenterY()))
+                        val opened = if (card.node != null) {
+                            gestureDispatcher(GestureAction.ClickNode(card.node))
+                        } else {
+                            false
+                        }
+                        if (!opened) {
+                            gestureDispatcher(GestureAction.Tap(card.bounds.exactCenterX(), card.bounds.exactCenterY()))
+                        }
                         return
                     }
                 }
