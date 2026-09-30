@@ -93,8 +93,8 @@ fun HomeScreen(navController: NavController) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column {
-                        Text("RidePilot", color = TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.Black)
-                        Text("مساعد الرحلات", color = TextMuted, fontSize = 12.sp)
+                        Text("RidePilot", color = TextPrimary, fontSize = 30.sp, fontWeight = FontWeight.Black)
+                        Text("لوحة قيادة ذكية للطلبات", color = TextMuted, fontSize = 12.sp)
                     }
                     StatusChip(
                         text = if (accessibilityConnected) "جاهز" else "يحتاج صلاحية",
@@ -106,7 +106,7 @@ fun HomeScreen(navController: NavController) {
             item {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = DarkCard),
-                    shape = RoundedCornerShape(22.dp),
+                    shape = RoundedCornerShape(26.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(18.dp)) {
@@ -117,14 +117,14 @@ fun HomeScreen(navController: NavController) {
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    if (automationEnabled) "الأتمتة شغالة" else "الأتمتة متوقفة",
+                                    if (automationEnabled) "التحكم التلقائي شغّال" else "التحكم التلقائي متوقف",
                                     color = TextPrimary,
                                     fontSize = 18.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    if (automationEnabled) "inDrive يتحكم حسب قواعدك • Uber تحليل فقط"
-                                    else "فعّلها بعد التأكد من الإعدادات",
+                                    if (automationEnabled) "inDrive ينفّذ قواعدك • Uber يقرأ ويحلّل"
+                                    else "فعّله بعد ضبط التسعير والزون",
                                     color = TextSecondary,
                                     fontSize = 12.sp
                                 )
@@ -183,7 +183,7 @@ fun HomeScreen(navController: NavController) {
                 item {
                     Card(
                         colors = CardDefaults.cardColors(containerColor = DarkCard),
-                        shape = RoundedCornerShape(18.dp),
+                        shape = RoundedCornerShape(20.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
@@ -216,7 +216,7 @@ fun HomeScreen(navController: NavController) {
                 }
             }
 
-            item { Text("الإعدادات الأساسية", color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+            item { Text("التحكم السريع", color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
 
             item {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -240,7 +240,7 @@ fun HomeScreen(navController: NavController) {
                 }
             }
 
-            item { Text("المزيد", color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+            item { Text("الأدوات", color = TextSecondary, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
 
             item {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -307,9 +307,9 @@ private fun AppStatusCard(modifier: Modifier, title: String, subtitle: String, a
     Card(
         modifier = modifier,
         colors = CardDefaults.cardColors(containerColor = DarkCard),
-        shape = RoundedCornerShape(18.dp)
+        shape = RoundedCornerShape(20.dp)
     ) {
-        Column(modifier = Modifier.padding(15.dp)) {
+        Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(8.dp).background(if (active) SuccessGreen else TextMuted, CircleShape))
                 Spacer(Modifier.size(8.dp))
