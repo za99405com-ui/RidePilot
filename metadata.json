@@ -1,0 +1,6 @@
+{
+  "name": "RidePilot",
+  "description": "تطبيق مساعد ذكي لسائقي Uber وinDrive لتحليل الطلبات وحساب التسعير وإدارة مناطق العمل",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
