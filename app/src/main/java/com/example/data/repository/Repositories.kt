@@ -55,5 +55,6 @@ class SettingsRepository(private val dataStoreManager: DataStoreManager) {
     suspend fun setZoneVerificationMode(mode: ZoneVerificationMode) = dataStoreManager.setZoneVerificationMode(mode)
     suspend fun setSwipeDirection(dir: SwipeDirection) = dataStoreManager.setSwipeDirection(dir)
     suspend fun setConfidenceThreshold(threshold: Int) = dataStoreManager.setConfidenceThreshold(threshold)
+    suspend fun applyV3AutomationDefaultsOnce() = dataStoreManager.applyV3AutomationDefaultsOnce()
     suspend fun updateNegotiationConfig(config: NegotiationConfig) = dataStoreManager.updateNegotiationConfig(config)
 }
