@@ -308,75 +308,72 @@ class RidePilotAccessibilityService : AccessibilityService() {
 
     private suspend fun executeGesture(action: InDriveStateMachine.GestureAction): Boolean =
         withContext(Dispatchers.Main.immediate) {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return@withContext false
-            
-                    return suspendCancellableCoroutine<Boolean> { cont ->
-                        when (action) {
-                            is InDriveStateMachine.GestureAction.Tap -> {
-                                val path = Path().apply {
-                                    moveTo(action.x, action.y)
-                                }
-                                val stroke = GestureDescription.StrokeDescription(path, 0, 100)
-                                val gesture = GestureDescription.Builder().addStroke(stroke).build()
-            
-                                dispatchGesture(gesture, object : GestureResultCallback() {
-                                    override fun onCompleted(gestureDescription: GestureDescription?) {
-                                        cont.resume(true)
-                                    }
-                                    override fun onCancelled(gestureDescription: GestureDescription?) {
-                                        cont.resume(false)
-                                    }
-                                }, null)
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
+                return@withContext false
+            }
+
+            suspendCancellableCoroutine { cont ->
+                when (action) {
+                    is InDriveStateMachine.GestureAction.Tap -> {
+                        val path = Path().apply { moveTo(action.x, action.y) }
+                        val stroke = GestureDescription.StrokeDescription(path, 0, 80)
+                        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+                        dispatchGesture(gesture, object : GestureResultCallback() {
+                            override fun onCompleted(gestureDescription: GestureDescription?) {
+                                if (cont.isActive) cont.resume(true)
                             }
-            
-                            is InDriveStateMachine.GestureAction.Swipe -> {
-                                val path = Path().apply {
-                                    moveTo(action.startX, action.startY)
-                                    lineTo(action.endX, action.endY)
-                                }
-                                val stroke = GestureDescription.StrokeDescription(path, 0, action.durationMs)
-                                val gesture = GestureDescription.Builder().addStroke(stroke).build()
-            
-                                dispatchGesture(gesture, object : GestureResultCallback() {
-                                    override fun onCompleted(gestureDescription: GestureDescription?) {
-                                        cont.resume(true)
-                                    }
-                                    override fun onCancelled(gestureDescription: GestureDescription?) {
-                                        cont.resume(false)
-                                    }
-                                }, null)
+                            override fun onCancelled(gestureDescription: GestureDescription?) {
+                                if (cont.isActive) cont.resume(false)
                             }
-            
-                            is InDriveStateMachine.GestureAction.ClickNode -> {
-                                var current: AccessibilityNodeInfo? = action.node
-                                var clicked = false
-                                var hops = 0
-                                while (current != null && hops < 5 && !clicked) {
-                                    clicked = current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                                    current = if (!clicked) current.parent else null
-                                    hops++
-                                }
-                                cont.resume(clicked)
-                            }
-            
-                            is InDriveStateMachine.GestureAction.SetText -> {
-                                val args = Bundle().apply {
-                                    putCharSequence(
-                                        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                                        action.text
-                                    )
-                                }
-                                val ok = action.node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-                                cont.resume(ok)
-                            }
-            
-                            is InDriveStateMachine.GestureAction.Back -> {
-                                performGlobalAction(GLOBAL_ACTION_BACK)
-                                cont.resume(true)
-                            }
+                        }, null)
+                    }
+
+                    is InDriveStateMachine.GestureAction.Swipe -> {
+                        val path = Path().apply {
+                            moveTo(action.startX, action.startY)
+                            lineTo(action.endX, action.endY)
                         }
+                        val stroke = GestureDescription.StrokeDescription(path, 0, action.durationMs)
+                        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+                        dispatchGesture(gesture, object : GestureResultCallback() {
+                            override fun onCompleted(gestureDescription: GestureDescription?) {
+                                if (cont.isActive) cont.resume(true)
+                            }
+                            override fun onCancelled(gestureDescription: GestureDescription?) {
+                                if (cont.isActive) cont.resume(false)
+                            }
+                        }, null)
+                    }
+
+                    is InDriveStateMachine.GestureAction.ClickNode -> {
+                        var current: AccessibilityNodeInfo? = action.node
+                        var clicked = false
+                        var hops = 0
+                        while (current != null && hops < 5 && !clicked) {
+                            clicked = current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            current = if (!clicked) current.parent else null
+                            hops++
+                        }
+                        if (cont.isActive) cont.resume(clicked)
+                    }
+
+                    is InDriveStateMachine.GestureAction.SetText -> {
+                        val args = Bundle().apply {
+                            putCharSequence(
+                                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                                action.text
+                            )
+                        }
+                        val ok = action.node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                        if (cont.isActive) cont.resume(ok)
+                    }
+
+                    is InDriveStateMachine.GestureAction.Back -> {
+                        val ok = performGlobalAction(GLOBAL_ACTION_BACK)
+                        if (cont.isActive) cont.resume(ok)
                     }
                 }
+            }
         }
 
 }
