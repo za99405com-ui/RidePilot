@@ -25,10 +25,9 @@ import java.util.concurrent.ConcurrentHashMap
 
 object ZoneEngine {
 
-    // ConcurrentHashMap does not allow null values. Keep successful and failed
-    // geocoding results separately so a failed lookup never crashes automation.
+    // Cache successful resolutions only. A failed lookup is allowed to retry
+    // because inDrive sometimes exposes a partial address on the first read.
     private val addressCache = ConcurrentHashMap<String, LatLngPoint>()
-    private val failedAddressCache = ConcurrentHashMap.newKeySet<String>()
 
     data class ZoneCheckResult(
         val isAllowed: Boolean,
@@ -266,25 +265,40 @@ object ZoneEngine {
         val cleanKey = addressText.trim().replace("\\s+".toRegex(), " ")
 
         addressCache[cleanKey]?.let { return it }
-        if (failedAddressCache.contains(cleanKey)) return null
 
         return withContext(Dispatchers.IO) {
             try {
                 val geocoder = Geocoder(context, Locale("ar", "EG"))
-                @Suppress("DEPRECATION")
-                val addresses = geocoder.getFromLocationName(cleanKey, 1) ?: emptyList()
-                val result = addresses.firstOrNull()?.let {
-                    LatLngPoint(it.latitude, it.longitude)
+
+                val queries = listOf(
+                    cleanKey,
+                    "$cleanKey, Alexandria, Egypt",
+                    "$cleanKey, الإسكندرية, مصر"
+                ).distinct()
+
+                var result: LatLngPoint? = null
+
+                for (query in queries) {
+                    @Suppress("DEPRECATION")
+                    val addresses = geocoder.getFromLocationName(query, 3) ?: emptyList()
+
+                    val alexandriaMatch = addresses.firstOrNull { address ->
+                        address.latitude in AlexandriaZoneCatalog.alexandriaSouth..AlexandriaZoneCatalog.alexandriaNorth &&
+                            address.longitude in AlexandriaZoneCatalog.alexandriaWest..AlexandriaZoneCatalog.alexandriaEast
+                    }
+
+                    val chosen = alexandriaMatch ?: addresses.firstOrNull()
+                    if (chosen != null) {
+                        result = LatLngPoint(chosen.latitude, chosen.longitude)
+                        break
+                    }
                 }
 
                 if (result != null) {
                     addressCache[cleanKey] = result
-                } else {
-                    failedAddressCache.add(cleanKey)
                 }
                 result
             } catch (_: Exception) {
-                failedAddressCache.add(cleanKey)
                 null
             }
         }
