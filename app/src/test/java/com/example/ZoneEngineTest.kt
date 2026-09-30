@@ -51,6 +51,71 @@ class ZoneEngineTest {
     }
 
     @Test
+    fun testMultiPolygonRoundTrip() {
+        val first = listOf(
+            LatLngPoint(31.20, 29.90),
+            LatLngPoint(31.21, 29.90),
+            LatLngPoint(31.21, 29.91),
+            LatLngPoint(31.20, 29.91)
+        )
+        val second = listOf(
+            LatLngPoint(31.30, 30.00),
+            LatLngPoint(31.31, 30.00),
+            LatLngPoint(31.31, 30.01),
+            LatLngPoint(31.30, 30.01)
+        )
+
+        val json = ZoneEngine.serializePolygonGroups(listOf(first, second))
+        val parsed = ZoneEngine.parsePolygonGroups(json)
+
+        assertTrue(parsed.size == 2)
+        assertTrue(
+            ZoneEngine.isPointInPolygonGroups(
+                LatLngPoint(31.205, 29.905),
+                parsed
+            )
+        )
+        assertTrue(
+            ZoneEngine.isPointInPolygonGroups(
+                LatLngPoint(31.305, 30.005),
+                parsed
+            )
+        )
+    }
+
+    @Test
+    fun testOverlappingPolygonsMergeIntoOneBoundary() {
+        val first = listOf(
+            LatLngPoint(31.20, 29.90),
+            LatLngPoint(31.24, 29.90),
+            LatLngPoint(31.24, 29.94),
+            LatLngPoint(31.20, 29.94)
+        )
+        val second = listOf(
+            LatLngPoint(31.22, 29.92),
+            LatLngPoint(31.26, 29.92),
+            LatLngPoint(31.26, 29.96),
+            LatLngPoint(31.22, 29.96)
+        )
+
+        val merged = ZoneEngine.mergePolygonGroups(listOf(first, second))
+
+        assertTrue(merged.size == 1)
+        assertTrue(
+            ZoneEngine.isPointInPolygonGroups(
+                LatLngPoint(31.205, 29.905),
+                merged
+            )
+        )
+        assertTrue(
+            ZoneEngine.isPointInPolygonGroups(
+                LatLngPoint(31.255, 29.955),
+                merged
+            )
+        )
+    }
+
+    @Test
     fun testKeywordMatchingFallback() {
         val zone = WorkZone(
             name = "المنتزه",
