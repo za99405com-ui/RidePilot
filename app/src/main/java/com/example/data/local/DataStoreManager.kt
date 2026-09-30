@@ -80,7 +80,7 @@ class DataStoreManager(private val context: Context) {
             negotiationStepEgp = it[PreferencesKeys.NEGOTIATION_STEP] ?: 5.0,
             maxNegotiationAttempts = it[PreferencesKeys.NEGOTIATION_MAX_ATTEMPTS] ?: 3,
             roundToEgp = it[PreferencesKeys.NEGOTIATION_ROUND_TO] ?: 5.0,
-            autoAccept = it[PreferencesKeys.NEGOTIATION_AUTO_ACCEPT] ?: false,
+            autoAccept = it[PreferencesKeys.NEGOTIATION_AUTO_ACCEPT] ?: true,
             autoCounterOffer = it[PreferencesKeys.NEGOTIATION_AUTO_COUNTER] ?: true
         )
     }
