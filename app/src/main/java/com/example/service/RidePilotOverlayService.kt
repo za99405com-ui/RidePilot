@@ -344,6 +344,8 @@ class RidePilotOverlayService : Service() {
                 }
             }
         }
+    }
+
     private fun bubbleDrawable(color: Int): GradientDrawable =
         GradientDrawable().apply {
             shape = GradientDrawable.OVAL
