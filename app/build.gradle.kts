@@ -98,6 +98,7 @@ dependencies {
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   implementation(libs.osmdroid.android)
+  implementation("org.locationtech.jts:jts-core:1.19.0")
   implementation(libs.play.services.mlkit.text.recognition)
   // implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
