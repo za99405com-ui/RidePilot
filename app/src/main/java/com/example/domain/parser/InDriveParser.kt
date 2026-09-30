@@ -65,12 +65,13 @@ object InDriveParser {
         var offlineButtonBounds: Rect? = null
         var isRequestsList = false
         var isOrderDetails = false
-        var isCounterOfferInput = false
+        var hasCounterOfferPrompt = false
         var isWaitingResponse = false
         var isResponseRejected = false
 
         val quickOfferMap = mutableMapOf<Double, Rect>()
         var editButtonBounds: Rect? = null
+        val editIconCandidates = mutableListOf<Rect>()
         var customOfferInputNode: AccessibilityNodeInfo? = null
         var customOfferInputText: String? = null
         var submitButtonBounds: Rect? = null
@@ -108,8 +109,11 @@ object InDriveParser {
                 isOrderDetails = true
             }
 
-            if (text.contains("اعرض الأجرة المناسبة لك")) {
-                isCounterOfferInput = true
+            if (text.contains("اعرض الأجرة المناسبة لك") || text.contains("اقترح أجرتك")) {
+                // This text is also present on the normal details screen above the
+                // quick-price chips. Do NOT classify the screen as a custom-input
+                // screen from this prompt alone.
+                hasCounterOfferPrompt = true
             }
 
             if (text.contains("جار عرض الأجرة المناسبة لك") || text.contains("انتظر الرد")) {
@@ -152,12 +156,23 @@ object InDriveParser {
                 }
             }
 
-            // Edit button (pencil)
-            if (node.isClickable && (text.contains("تعديل") || node.className == "android.widget.ImageButton" || node.className == "android.widget.ImageView")) {
+            // Explicit edit label or unlabeled image-button candidate. We choose the
+            // actual pencil after the whole tree is scanned, using the quick-offer row.
+            if (node.isClickable && text.contains("تعديل")) {
                 val rect = Rect()
                 node.getBoundsInScreen(rect)
-                if (rect.width() in 40..200 && rect.height() in 40..200 && rect.top > 800) {
+                if (rect.width() in 40..240 && rect.height() in 40..240) {
                     editButtonBounds = rect
+                }
+            } else if (
+                node.isClickable &&
+                (node.className?.toString() == "android.widget.ImageButton" ||
+                    node.className?.toString() == "android.widget.ImageView")
+            ) {
+                val rect = Rect()
+                node.getBoundsInScreen(rect)
+                if (rect.width() in 40..240 && rect.height() in 40..240) {
+                    editIconCandidates.add(rect)
                 }
             }
 
@@ -170,9 +185,31 @@ object InDriveParser {
 
         inspectNode(root)
 
+        // The pencil sits on the same horizontal row as the quick-price chips.
+        // Pick the closest image button to that row instead of a random map/profile icon.
+        if (editButtonBounds == null && quickOfferMap.isNotEmpty() && editIconCandidates.isNotEmpty()) {
+            val chipCentersY = quickOfferMap.values.map { it.exactCenterY() }
+            val avgChipY = chipCentersY.average().toFloat()
+            editButtonBounds = editIconCandidates
+                .filter { kotlin.math.abs(it.exactCenterY() - avgChipY) <= 140f }
+                .minByOrNull { it.exactCenterX() }
+        }
+
+        // A custom-offer input screen is confirmed only when an editable field is
+        // actually present. The normal details screen contains the same prompt text.
+        val isCounterOfferInput =
+            customOfferInputNode != null &&
+                (submitButtonBounds != null || hasCounterOfferPrompt)
+
+        // Some inDrive versions do not expose the "طلب ركوب" heading. The accept
+        // button or quick-offer chips are enough to identify the details screen.
+        if (acceptButtonBounds != null || quickOfferMap.isNotEmpty()) {
+            isOrderDetails = true
+        }
+
         val screenType = when {
-            isCounterOfferInput -> InDriveScreenType.COUNTER_OFFER_INPUT
             isWaitingResponse -> InDriveScreenType.WAITING_RESPONSE
+            isCounterOfferInput -> InDriveScreenType.COUNTER_OFFER_INPUT
             isOrderDetails -> InDriveScreenType.ORDER_DETAILS
             isRequestsList -> InDriveScreenType.REQUESTS_LIST
             else -> InDriveScreenType.UNKNOWN
