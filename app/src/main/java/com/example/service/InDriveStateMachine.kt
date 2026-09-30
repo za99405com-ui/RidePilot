@@ -36,7 +36,7 @@ class InDriveStateMachine(
             val startY: Float,
             val endX: Float,
             val endY: Float,
-            val durationMs: Long = 260
+            val durationMs: Long = 210
         ) : GestureAction()
         data class ClickNode(val node: AccessibilityNodeInfo) : GestureAction()
         data class SetText(val node: AccessibilityNodeInfo, val text: String) : GestureAction()
@@ -134,7 +134,7 @@ class InDriveStateMachine(
                 val key = orderKey(card)
 
                 val now = System.currentTimeMillis()
-                if (key == lastOrderKey && now - lastOpenedAt < 900L) return
+                if (key == lastOrderKey && now - lastOpenedAt < 650L) return
 
                 if (key != lastOrderKey) {
                     currentAttemptCount = 0
@@ -372,7 +372,7 @@ class InDriveStateMachine(
                     return
                 }
 
-                delay(80)
+                delay(55)
                 logger("SUBMIT_COUNTER", "إرسال عرض $textValue ج — انتظر الرد", target, null, parsed.confidence)
                 gestureDispatcher(
                     GestureAction.Tap(
