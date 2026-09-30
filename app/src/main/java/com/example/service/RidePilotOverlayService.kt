@@ -24,12 +24,12 @@ import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.RidePilotApplication
-import com.example.domain.engine.PricingEngine
+import com.example.data.model.AppTarget
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 class RidePilotOverlayService : Service() {
@@ -128,11 +128,13 @@ class RidePilotOverlayService : Service() {
             setBackgroundColor(0x00000000)
         }
 
+        val density = resources.displayMetrics.density
         val cardLayout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(28, 20, 28, 20)
-            setBackgroundColor(0xF0121A24.toInt()) // dark modern card background
-            elevation = 16f
+            setPadding((14 * density).toInt(), (10 * density).toInt(), (14 * density).toInt(), (10 * density).toInt())
+            setBackgroundColor(0xF20B0D12.toInt())
+            elevation = 12f
+            layoutParams = FrameLayout.LayoutParams((255 * density).toInt(), FrameLayout.LayoutParams.WRAP_CONTENT)
         }
 
         // Header with App Title, Minimize and Drag Handle
@@ -143,8 +145,8 @@ class RidePilotOverlayService : Service() {
 
         val titleText = TextView(context).apply {
             text = "RidePilot"
-            setTextColor(0xFF10B981.toInt()) // Emerald Green
-            textSize = 15f
+            setTextColor(0xFF5B9CFF.toInt())
+            textSize = 13f
             setTypeface(null, android.graphics.Typeface.BOLD)
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -175,17 +177,18 @@ class RidePilotOverlayService : Service() {
         }
 
         val statusBadge = TextView(context).apply {
-            text = "في انتظار كشف الطلبات..."
-            textSize = 14f
+            text = "في انتظار الطلب..."
+            textSize = 12.5f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setTextColor(0xFFF59E0B.toInt()) // amber
         }
 
         val detailsText = TextView(context).apply {
             text = "افتح Uber أو inDrive لبدء التحليل التلقائي"
-            textSize = 12f
-            setTextColor(0xFFCBD5E1.toInt())
-            setPadding(0, 6, 0, 10)
+            textSize = 10.5f
+            setTextColor(0xFFB8BDC8.toInt())
+            setPadding(0, (4 * density).toInt(), 0, (6 * density).toInt())
+            maxLines = 4
         }
 
         // Action Buttons Row: PAUSE & STOP
@@ -196,21 +199,21 @@ class RidePilotOverlayService : Service() {
         }
 
         val pauseBtn = Button(context).apply {
-            text = "إيقاف مؤقت"
-            setBackgroundColor(0xFFD97706.toInt())
+            text = "إيقاف"
+            setBackgroundColor(0xFF2A2E36.toInt())
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 11f
-            layoutParams = LinearLayout.LayoutParams(0, 95, 1f).apply {
-                marginEnd = 10
+            layoutParams = LinearLayout.LayoutParams(0, (36 * density).toInt(), 1f).apply {
+                marginEnd = (6 * density).toInt()
             }
         }
 
         val stopBtn = Button(context).apply {
-            text = "STOP كامل"
-            setBackgroundColor(0xFFDC2626.toInt())
+            text = "STOP"
+            setBackgroundColor(0xFFB3261E.toInt())
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 11f
-            layoutParams = LinearLayout.LayoutParams(0, 95, 1f)
+            layoutParams = LinearLayout.LayoutParams(0, (36 * density).toInt(), 1f)
         }
 
         btnRow.addView(pauseBtn)
@@ -280,50 +283,63 @@ class RidePilotOverlayService : Service() {
         val statusBadge = body.getChildAt(0) as TextView
         val detailsText = body.getChildAt(1) as TextView
 
-        // Observe Uber analysis
         serviceScope.launch {
-            RidePilotAccessibilityService.latestUberAnalysis.collectLatest { analysis ->
-                if (analysis != null) {
-                    val offer = analysis.offer
-                    if (analysis.isPriceViable && analysis.isInsideZone) {
-                        statusBadge.text = "UBER: ✅ مناسب"
-                        statusBadge.setTextColor(0xFF10B981.toInt()) // Green
-                    } else {
-                        statusBadge.text = "UBER: ❌ غير مناسب"
-                        statusBadge.setTextColor(0xFFEF4444.toInt()) // Red
+            combine(
+                RidePilotAccessibilityService.activeTarget,
+                RidePilotAccessibilityService.latestUberAnalysis,
+                RidePilotAccessibilityService.latestInDriveParsed
+            ) { target, uber, inDrive -> Triple(target, uber, inDrive) }
+                .collect { (target, uber, inDrive) ->
+                    when (target) {
+                        AppTarget.UBER -> {
+                            if (uber == null) {
+                                statusBadge.text = "Uber • جاري قراءة الطلب"
+                                statusBadge.setTextColor(0xFF5B9CFF.toInt())
+                                detailsText.text = "انتظر لحظة حتى تكتمل قراءة السعر والمسافات."
+                            } else {
+                                val good = uber.isPriceViable && uber.isInsideZone
+                                statusBadge.text = if (good) "Uber • ✓ مناسب" else "Uber • ✕ غير مناسب"
+                                statusBadge.setTextColor(if (good) 0xFF58C98D.toInt() else 0xFFFF6B6B.toInt())
+                                val offer = uber.offer
+                                detailsText.text = buildString {
+                                    append("${offer.displayedPrice ?: 0} ج.م")
+                                    append("  •  ${uber.totalPricingDistanceKm} كم")
+                                    append("\n${uber.pricePerKm} ج/كم  •  الحد ${uber.minRequiredPrice} ج")
+                                    if (!uber.isInsideZone) append("\nخارج منطقة العمل")
+                                }
+                            }
+                        }
+
+                        AppTarget.INDRIVE -> {
+                            if (inDrive == null) {
+                                statusBadge.text = "inDrive • جاري القراءة"
+                                statusBadge.setTextColor(0xFF5B9CFF.toInt())
+                                detailsText.text = ""
+                            } else {
+                                val offline = inDrive.isOffline
+                                statusBadge.text = if (offline) "inDrive • غير متصل" else "inDrive • تحقق من الحالة"
+                                statusBadge.setTextColor(if (offline) 0xFF58C98D.toInt() else 0xFFFFB84D.toInt())
+                                detailsText.text = buildString {
+                                    append(inDrive.screenType.name)
+                                    inDrive.activeOffer?.let { offer ->
+                                        append("\n${offer.displayedPrice ?: "—"} ج.م")
+                                        offer.tripDistanceKm?.let { append("  •  $it كم") }
+                                    }
+                                    if (inDrive.orderCards.isNotEmpty()) {
+                                        append("\nطلبات مرصودة: ${inDrive.orderCards.size}")
+                                    }
+                                }
+                            }
+                        }
+
+                        null -> {
+                            statusBadge.text = "RidePilot • جاهز"
+                            statusBadge.setTextColor(0xFF5B9CFF.toInt())
+                            detailsText.text = "افتح Uber أو inDrive."
+                        }
                     }
-
-                    val info = StringBuilder()
-                    info.append("السعر: ${offer.displayedPrice ?: 0} ج.م\n")
-                    info.append("المسافة: ${analysis.totalPricingDistanceKm} كم (${analysis.pricePerKm} ج.م/كم)\n")
-                    info.append("الحد الأدنى: ${analysis.minRequiredPrice} ج.م\n")
-                    info.append(analysis.zoneStatusReason)
-
-                    detailsText.text = info.toString()
                 }
-            }
-        }
-
-        // Observe inDrive parsed
-        serviceScope.launch {
-            RidePilotAccessibilityService.latestInDriveParsed.collectLatest { parsed ->
-                if (parsed != null && parsed.screenType != com.example.domain.parser.InDriveParser.InDriveScreenType.UNKNOWN) {
-                    val statusText = if (parsed.isOffline) "inDrive: غير متصل (آمن)" else "inDrive: متصل ⚠"
-                    statusBadge.text = statusText
-                    statusBadge.setTextColor(if (parsed.isOffline) 0xFF10B981.toInt() else 0xFFEF4444.toInt())
-
-                    val sb = StringBuilder()
-                    sb.append("الشاشة: ${parsed.screenType.name}\n")
-                    if (parsed.orderCards.isNotEmpty()) {
-                        sb.append("الطلبات المرصودة: ${parsed.orderCards.size} طلبات\n")
-                    }
-                    if (parsed.activeOffer != null) {
-                        val off = parsed.activeOffer
-                        sb.append("عرض العميل: ${off.displayedPrice ?: 0} EGP (${off.tripDistanceKm ?: 0} كم)\n")
-                    }
-                    detailsText.text = sb.toString()
-                }
-            }
         }
     }
+
 }
