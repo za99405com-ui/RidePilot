@@ -29,8 +29,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
@@ -79,13 +79,13 @@ import androidx.navigation.NavController
 import com.example.RidePilotApplication
 import com.example.data.model.LatLngPoint
 import com.example.data.model.WorkZone
+import com.example.domain.engine.AreaBoundaryResolver
 import com.example.domain.engine.ZoneEngine
 import com.example.ui.theme.AmberAccent
 import com.example.ui.theme.BorderDark
 import com.example.ui.theme.DangerRed
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCard
-import com.example.ui.theme.DarkSurfaceVariant
 import com.example.ui.theme.EmeraldPrimary
 import com.example.ui.theme.SuccessGreen
 import com.example.ui.theme.TextMuted
@@ -95,8 +95,6 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.launch
-import org.json.JSONArray
-import org.json.JSONObject
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
@@ -105,31 +103,46 @@ import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
 import java.util.Locale
 
+private enum class ZoneMapMode {
+    BROWSE,
+    RECOGNIZE,
+    MANUAL,
+    EDIT
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ZonesScreen(
-    navController: NavController
-) {
+fun ZonesScreen(navController: NavController) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val app = RidePilotApplication.instance
     val zones by app.zoneRepository.getAllZones().collectAsState(initial = emptyList())
 
-    var showCreateDialog by remember { mutableStateOf(false) }
+    var mapViewInstance by remember { mutableStateOf<MapView?>(null) }
+    var mapMode by remember { mutableStateOf(ZoneMapMode.BROWSE) }
+
+    val previewGroups = remember { mutableStateListOf<List<GeoPoint>>() }
+    val manualPoints = remember { mutableStateListOf<GeoPoint>() }
+    val selectedNames = remember { mutableStateListOf<String>() }
+    val selectedAreaIds = remember { mutableStateListOf<String>() }
+
+    var editingGroupIndex by remember { mutableStateOf(0) }
+    var editingExistingZone by remember { mutableStateOf<WorkZone?>(null) }
+
+    var showSaveDialog by remember { mutableStateOf(false) }
     var zoneNameInput by remember { mutableStateOf("") }
     var zoneKeywordsInput by remember { mutableStateOf("") }
 
-    val drawnPoints = remember { mutableStateListOf<GeoPoint>() }
-    var mapViewInstance by remember { mutableStateOf<MapView?>(null) }
-    var drawMode by remember { mutableStateOf(false) }
-    var selectionClosed by remember { mutableStateOf(false) }
+    var isRecognizing by remember { mutableStateOf(false) }
+    var mapMessage by remember { mutableStateOf("اضغط «اختيار منطقة» ثم اضغط داخل أي منطقة على الخريطة") }
 
     var currentLocation by remember { mutableStateOf<GeoPoint?>(null) }
     var isLocating by remember { mutableStateOf(false) }
-    var locationMessage by remember { mutableStateOf<String?>(null) }
-    var autoRadiusKm by remember { mutableStateOf(3f) }
     var locateAfterPermission by remember { mutableStateOf(false) }
-    var autoZoneAfterLocate by remember { mutableStateOf(false) }
+    var recognizeCurrentAfterLocate by remember { mutableStateOf(false) }
+
+    var radiusKm by remember { mutableStateOf(3f) }
+    var showRadiusTools by remember { mutableStateOf(false) }
 
     var hasLocationPermission by remember {
         mutableStateOf(
@@ -148,48 +161,79 @@ fun ZonesScreen(
         LocationServices.getFusedLocationProviderClient(context)
     }
 
+    fun resetDraft() {
+        previewGroups.clear()
+        manualPoints.clear()
+        selectedNames.clear()
+        selectedAreaIds.clear()
+        editingExistingZone = null
+        editingGroupIndex = 0
+        zoneNameInput = ""
+        zoneKeywordsInput = ""
+        mapMode = ZoneMapMode.BROWSE
+    }
+
+    fun previewAsModel(): List<List<LatLngPoint>> =
+        previewGroups.map { group ->
+            group.map { LatLngPoint(it.latitude, it.longitude) }
+        }
+
+    fun focusGroups(groups: List<List<GeoPoint>>, preferredZoom: Double = 13.5) {
+        val all = groups.flatten()
+        if (all.isEmpty()) return
+        val center = GeoPoint(
+            all.map { it.latitude }.average(),
+            all.map { it.longitude }.average()
+        )
+        mapViewInstance?.controller?.animateTo(center)
+        mapViewInstance?.controller?.setZoom(preferredZoom)
+    }
+
     fun renderMap(mapView: MapView?) {
         if (mapView == null) return
 
-        // Rebuild visual overlays while preserving the touch/drawing overlay.
-        mapView.overlays.removeAll { it is Polygon || it is Polyline || it is Marker }
+        mapView.overlays.removeAll {
+            it is Polygon || it is Polyline || it is Marker
+        }
 
         zones.forEach { zone ->
-            val points = ZoneEngine.parsePolygonJson(zone.polygonJson)
-                .map { GeoPoint(it.latitude, it.longitude) }
+            if (editingExistingZone?.id == zone.id) return@forEach
 
-            if (points.size >= 3) {
+            ZoneEngine.parsePolygonGroups(zone.polygonJson).forEach { group ->
+                if (group.size < 3) return@forEach
+
                 mapView.overlays.add(
                     Polygon(mapView).apply {
-                        this.points = points
+                        points = group.map { GeoPoint(it.latitude, it.longitude) }
                         title = zone.name
-                        fillPaint.color = if (zone.isEnabled) 0x2250D6A0 else 0x1675849A
+                        fillPaint.color = if (zone.isEnabled) 0x1F50D6A0 else 0x1275849A
                         outlinePaint.color =
                             if (zone.isEnabled) 0xFF50D6A0.toInt() else 0xFF75849A.toInt()
-                        outlinePaint.strokeWidth = if (zone.isEnabled) 4.5f else 3f
+                        outlinePaint.strokeWidth = if (zone.isEnabled) 4f else 2.5f
                     }
                 )
             }
         }
 
-        if (drawnPoints.size >= 2 && !selectionClosed) {
+        previewGroups.forEachIndexed { index, group ->
+            if (group.size < 3) return@forEachIndexed
             mapView.overlays.add(
-                Polyline(mapView).apply {
-                    setPoints(drawnPoints.toList())
+                Polygon(mapView).apply {
+                    points = group
+                    title = selectedNames.getOrNull(index) ?: "Zone جديدة"
+                    fillPaint.color = 0x3363A7FF
                     outlinePaint.color = 0xFF63A7FF.toInt()
-                    outlinePaint.strokeWidth = 7f
+                    outlinePaint.strokeWidth = 6f
                 }
             )
         }
 
-        if (drawnPoints.size >= 3 && selectionClosed) {
+        if (mapMode == ZoneMapMode.MANUAL && manualPoints.isNotEmpty()) {
             mapView.overlays.add(
-                Polygon(mapView).apply {
-                    points = drawnPoints.toList()
-                    title = "الزون الجديدة"
-                    fillPaint.color = 0x3363A7FF
-                    outlinePaint.color = 0xFF63A7FF.toInt()
-                    outlinePaint.strokeWidth = 6f
+                Polyline(mapView).apply {
+                    setPoints(manualPoints.toList())
+                    outlinePaint.color = 0xFFFFB44D.toInt()
+                    outlinePaint.strokeWidth = 7f
                 }
             )
         }
@@ -204,24 +248,91 @@ fun ZonesScreen(
             )
         }
 
+        if (mapMode == ZoneMapMode.EDIT && previewGroups.isNotEmpty()) {
+            val groupIndex = editingGroupIndex.coerceIn(0, previewGroups.lastIndex)
+            val editable = previewGroups[groupIndex]
+
+            editable.forEachIndexed { pointIndex, point ->
+                val marker = Marker(mapView).apply {
+                    position = point
+                    title = "نقطة \${pointIndex + 1}"
+                    isDraggable = true
+                    setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                }
+
+                marker.setOnMarkerDragListener(
+                    object : Marker.OnMarkerDragListener {
+                        override fun onMarkerDrag(marker: Marker?) = Unit
+                        override fun onMarkerDragStart(marker: Marker?) = Unit
+
+                        override fun onMarkerDragEnd(marker: Marker?) {
+                            val newPosition = marker?.position ?: return
+                            if (groupIndex !in previewGroups.indices) return
+                            val updated = previewGroups[groupIndex].toMutableList()
+                            if (pointIndex !in updated.indices) return
+                            updated[pointIndex] = GeoPoint(
+                                newPosition.latitude,
+                                newPosition.longitude
+                            )
+                            previewGroups[groupIndex] = updated
+                            renderMap(mapView)
+                        }
+                    }
+                )
+
+                mapView.overlays.add(marker)
+            }
+        }
+
         mapView.invalidate()
     }
 
-    fun focusOn(point: GeoPoint, zoom: Double = 16.0) {
-        mapViewInstance?.let { mapView ->
-            mapView.controller.animateTo(point)
-            mapView.controller.setZoom(zoom)
+    fun focusZone(zone: WorkZone) {
+        val groups = ZoneEngine.parsePolygonGroups(zone.polygonJson)
+            .map { group -> group.map { GeoPoint(it.latitude, it.longitude) } }
+        focusGroups(groups, 13.5)
+    }
+
+    fun updateAutoName() {
+        if (selectedNames.isNotEmpty()) {
+            zoneNameInput = selectedNames.distinct().joinToString(" + ")
+            zoneKeywordsInput = selectedNames.distinct().joinToString(",")
         }
     }
 
-    fun focusZone(zone: WorkZone) {
-        val points = ZoneEngine.parsePolygonJson(zone.polygonJson)
-        if (points.isEmpty()) return
-        val center = GeoPoint(
-            points.map { it.latitude }.average(),
-            points.map { it.longitude }.average()
-        )
-        focusOn(center, if (points.size >= 20) 13.5 else 14.5)
+    suspend fun recognizeAt(point: GeoPoint) {
+        if (isRecognizing) return
+        isRecognizing = true
+        mapMessage = "جار التعرف على المنطقة وحدودها…"
+
+        val result = AreaBoundaryResolver.resolve(point.latitude, point.longitude)
+        result.onSuccess { area ->
+            if (area.osmKey in selectedAreaIds) {
+                mapMessage = "منطقة «\${area.name}» محددة بالفعل"
+                return@onSuccess
+            }
+
+            val groups = area.polygons.map { polygon ->
+                polygon.map { GeoPoint(it.latitude, it.longitude) }
+            }
+
+            if (groups.isEmpty()) {
+                mapMessage = "تم التعرف على الاسم لكن لم نجد حدودًا قابلة للرسم"
+                return@onSuccess
+            }
+
+            selectedAreaIds.add(area.osmKey)
+            selectedNames.add(area.name)
+            previewGroups.addAll(groups)
+            updateAutoName()
+            mapMessage = "تم تحديد «\${area.name}» • اختر منطقة أخرى أو اضغط دمج"
+            renderMap(mapViewInstance)
+            focusGroups(groups, 13.8)
+        }.onFailure {
+            mapMessage = "تعذر تحديد حدود المنطقة • جرّب نقطة أقرب لمنتصف المنطقة"
+        }
+
+        isRecognizing = false
     }
 
     @SuppressLint("MissingPermission")
@@ -229,58 +340,71 @@ fun ZonesScreen(
         if (!hasLocationPermission) return
 
         isLocating = true
-        locationMessage = "جار تحديد موقعك بدقة…"
-        val cancellation = CancellationTokenSource()
+        mapMessage = "جار تحديد موقعك…"
+        val token = CancellationTokenSource()
 
         fusedLocationClient
-            .getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, cancellation.token)
+            .getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, token.token)
             .addOnSuccessListener { location ->
                 if (location != null) {
                     currentLocation = GeoPoint(location.latitude, location.longitude)
                     isLocating = false
-                    locationMessage = "تم تحديد موقعك"
-                    focusOn(currentLocation!!, 16.5)
+                    mapViewInstance?.controller?.animateTo(currentLocation)
+                    mapViewInstance?.controller?.setZoom(16.0)
                     renderMap(mapViewInstance)
+                    mapMessage = "تم تحديد موقعك"
+
+                    if (recognizeCurrentAfterLocate) {
+                        recognizeCurrentAfterLocate = false
+                        scope.launch { recognizeAt(currentLocation!!) }
+                    }
                 } else {
                     fusedLocationClient.lastLocation
                         .addOnSuccessListener { last ->
                             isLocating = false
                             if (last != null) {
                                 currentLocation = GeoPoint(last.latitude, last.longitude)
-                                locationMessage = "تم استخدام آخر موقع معروف"
-                                focusOn(currentLocation!!, 16.0)
                                 renderMap(mapViewInstance)
+                                mapMessage = "تم استخدام آخر موقع معروف"
+                                if (recognizeCurrentAfterLocate) {
+                                    recognizeCurrentAfterLocate = false
+                                    scope.launch { recognizeAt(currentLocation!!) }
+                                }
                             } else {
-                                locationMessage = "تعذر تحديد الموقع — فعّل GPS وحاول مرة أخرى"
+                                mapMessage = "تعذر تحديد الموقع — فعّل GPS"
                             }
                         }
                         .addOnFailureListener {
                             isLocating = false
-                            locationMessage = "تعذر قراءة الموقع"
+                            mapMessage = "تعذر قراءة الموقع"
                         }
                 }
             }
             .addOnFailureListener {
                 isLocating = false
-                locationMessage = "تعذر تحديد الموقع — حاول مرة أخرى"
+                mapMessage = "تعذر تحديد الموقع"
             }
     }
 
     val locationLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { results ->
+    ) { result ->
         hasLocationPermission =
-            results[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
-                results[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+            result[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                result[Manifest.permission.ACCESS_COARSE_LOCATION] == true
 
-        if (!hasLocationPermission) {
+        if (hasLocationPermission && locateAfterPermission) {
             locateAfterPermission = false
-            autoZoneAfterLocate = false
-            locationMessage = "إذن الموقع مطلوب للتحديد التلقائي"
+            locateNow()
+        } else if (!hasLocationPermission) {
+            locateAfterPermission = false
+            recognizeCurrentAfterLocate = false
+            mapMessage = "إذن الموقع مطلوب لاختيار منطقتك تلقائيًا"
         }
     }
 
-    fun requestLocation() {
+    fun requestLocation(recognizeAreaAfter: Boolean = false) {
+        recognizeCurrentAfterLocate = recognizeAreaAfter
         if (hasLocationPermission) {
             locateNow()
         } else {
@@ -294,59 +418,101 @@ fun ZonesScreen(
         }
     }
 
-    fun createAutomaticZonePreview() {
-        val center = currentLocation
-        if (center == null) {
-            autoZoneAfterLocate = true
-            locationMessage = "جار تحديد موقعك لإنشاء الـZone تلقائيًا…"
+    fun recognizeCurrentArea() {
+        val point = currentLocation
+        if (point != null) {
+            scope.launch { recognizeAt(point) }
+        } else {
+            requestLocation(recognizeAreaAfter = true)
+        }
+    }
+
+    fun mergeSelectedAreas() {
+        val groups = previewAsModel()
+        if (groups.size < 2) {
+            mapMessage = "اختر منطقتين أو أكثر قبل الدمج"
+            return
+        }
+
+        val merged = ZoneEngine.mergePolygonGroups(groups)
+        if (merged.isEmpty()) {
+            mapMessage = "تعذر دمج الحدود"
+            return
+        }
+
+        previewGroups.clear()
+        previewGroups.addAll(
+            merged.map { group ->
+                group.map { GeoPoint(it.latitude, it.longitude) }
+            }
+        )
+        editingGroupIndex = 0
+        mapMode = ZoneMapMode.BROWSE
+        mapMessage = if (previewGroups.size == 1) {
+            "تم دمج المناطق في حد واحد"
+        } else {
+            "تم دمج المناطق كـ Zone واحدة من \${previewGroups.size} أجزاء"
+        }
+        renderMap(mapViewInstance)
+        focusGroups(previewGroups.toList(), 13.2)
+    }
+
+    fun createRadiusZone() {
+        val point = currentLocation
+        if (point == null) {
+            mapMessage = "حدد موقعك أولًا"
             requestLocation()
             return
         }
 
-        val generated = ZoneEngine.createCirclePolygon(
-            center = LatLngPoint(center.latitude, center.longitude),
-            radiusKm = autoRadiusKm.toDouble(),
+        val circle = ZoneEngine.createCirclePolygon(
+            LatLngPoint(point.latitude, point.longitude),
+            radiusKm.toDouble(),
             segments = 48
         )
 
-        drawnPoints.clear()
-        drawnPoints.addAll(generated.map { GeoPoint(it.latitude, it.longitude) })
-        drawMode = false
-        selectionClosed = true
-
-        if (zoneNameInput.isBlank()) {
-            zoneNameInput = String.format(Locale.US, "حول موقعي %.1f كم", autoRadiusKm)
-        }
-
-        val zoom = when {
-            autoRadiusKm <= 1f -> 15.3
-            autoRadiusKm <= 3f -> 14.2
-            autoRadiusKm <= 7f -> 12.8
-            else -> 11.5
-        }
-
-        focusOn(center, zoom)
+        resetDraft()
+        selectedNames.add(
+            String.format(Locale.US, "حول موقعي %.1f كم", radiusKm)
+        )
+        previewGroups.add(circle.map { GeoPoint(it.latitude, it.longitude) })
+        updateAutoName()
+        mapMessage = "تم إنشاء Zone دائري احتياطي"
         renderMap(mapViewInstance)
-        locationMessage = "تم إنشاء Zone تلقائيًا حول موقعك"
+        focusGroups(previewGroups.toList(), 14.0)
     }
 
-    LaunchedEffect(hasLocationPermission, locateAfterPermission) {
-        if (hasLocationPermission && locateAfterPermission) {
-            locateAfterPermission = false
-            locateNow()
+    fun startEditingPreview() {
+        if (previewGroups.isEmpty()) {
+            mapMessage = "حدد منطقة أولًا"
+            return
         }
+        editingGroupIndex = editingGroupIndex.coerceIn(0, previewGroups.lastIndex)
+        mapMode = ZoneMapMode.EDIT
+        mapMessage = "اسحب نقاط الحدود لتعديلها ثم اضغط إنهاء التعديل"
+        renderMap(mapViewInstance)
     }
 
-    LaunchedEffect(currentLocation, autoZoneAfterLocate) {
-        if (currentLocation != null && autoZoneAfterLocate) {
-            autoZoneAfterLocate = false
-            createAutomaticZonePreview()
-        }
+    fun loadZoneForEditing(zone: WorkZone) {
+        resetDraft()
+        editingExistingZone = zone
+        zoneNameInput = zone.name
+        zoneKeywordsInput = zone.allowedKeywords
+
+        val groups = ZoneEngine.parsePolygonGroups(zone.polygonJson)
+            .map { group -> group.map { GeoPoint(it.latitude, it.longitude) } }
+
+        previewGroups.addAll(groups)
+        selectedNames.add(zone.name)
+        mapMode = ZoneMapMode.EDIT
+        mapMessage = "تعديل «\${zone.name}» • اسحب النقاط ثم احفظ"
+        focusGroups(groups, 13.8)
+        renderMap(mapViewInstance)
     }
 
     LaunchedEffect(Unit) {
         if (hasLocationPermission) {
-            locateNow()
+            requestLocation()
         }
     }
 
@@ -356,9 +522,7 @@ fun ZonesScreen(
 
     DisposableEffect(mapViewInstance) {
         mapViewInstance?.onResume()
-        onDispose {
-            mapViewInstance?.onPause()
-        }
+        onDispose { mapViewInstance?.onPause() }
     }
 
     Scaffold(
@@ -366,8 +530,8 @@ fun ZonesScreen(
             TopAppBar(
                 title = {
                     Column {
-                        Text("مناطق العمل", fontWeight = FontWeight.Bold, color = TextPrimary)
-                        Text("Interactive Work Zones", fontSize = 10.sp, color = TextMuted)
+                        Text("مناطق العمل", color = TextPrimary, fontWeight = FontWeight.Bold)
+                        Text("تحديد ذكي • تعديل • دمج", color = TextMuted, fontSize = 10.sp)
                     }
                 },
                 navigationIcon = {
@@ -382,9 +546,8 @@ fun ZonesScreen(
                 actions = {
                     IconButton(
                         onClick = {
-                            drawMode = false
-                            selectionClosed = false
-                            drawnPoints.clear()
+                            resetDraft()
+                            mapMessage = "تم مسح التحديد الحالي"
                             renderMap(mapViewInstance)
                         }
                     ) {
@@ -399,13 +562,13 @@ fun ZonesScreen(
             )
         },
         floatingActionButton = {
-            if (drawnPoints.size >= 3 || zoneKeywordsInput.isNotBlank()) {
+            if (previewGroups.isNotEmpty()) {
                 FloatingActionButton(
-                    onClick = { showCreateDialog = true },
+                    onClick = { showSaveDialog = true },
                     containerColor = EmeraldPrimary,
                     contentColor = Color.White
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = "حفظ منطقة")
+                    Icon(Icons.Default.Add, contentDescription = "حفظ Zone")
                 }
             }
         },
@@ -419,7 +582,7 @@ fun ZonesScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(310.dp)
+                    .height(330.dp)
                     .padding(horizontal = 14.dp, vertical = 8.dp)
                     .clip(RoundedCornerShape(18.dp))
                     .border(1.dp, BorderDark, RoundedCornerShape(18.dp))
@@ -431,22 +594,34 @@ fun ZonesScreen(
                             setMultiTouchControls(true)
                             setBuiltInZoomControls(false)
                             controller.setZoom(11.5)
-                            controller.setCenter(GeoPoint(30.0444, 31.2357))
+                            controller.setCenter(GeoPoint(31.2001, 29.9187))
 
                             val touchOverlay = object : org.osmdroid.views.overlay.Overlay() {
                                 override fun onSingleTapConfirmed(
                                     event: MotionEvent?,
                                     mapView: MapView?
                                 ): Boolean {
-                                    if (!drawMode || event == null || mapView == null) return false
+                                    if (event == null || mapView == null) return false
 
-                                    val point = mapView.projection
-                                        .fromPixels(event.x.toInt(), event.y.toInt()) as GeoPoint
+                                    val point = mapView.projection.fromPixels(
+                                        event.x.toInt(),
+                                        event.y.toInt()
+                                    ) as GeoPoint
 
-                                    drawnPoints.add(point)
-                                    selectionClosed = false
-                                    renderMap(mapView)
-                                    return true
+                                    return when (mapMode) {
+                                        ZoneMapMode.RECOGNIZE -> {
+                                            scope.launch { recognizeAt(point) }
+                                            true
+                                        }
+
+                                        ZoneMapMode.MANUAL -> {
+                                            manualPoints.add(point)
+                                            renderMap(mapView)
+                                            true
+                                        }
+
+                                        else -> false
+                                    }
                                 }
                             }
 
@@ -467,7 +642,7 @@ fun ZonesScreen(
                         .align(Alignment.TopCenter)
                         .padding(10.dp),
                     colors = CardDefaults.cardColors(
-                        containerColor = DarkCard.copy(alpha = 0.94f)
+                        containerColor = DarkCard.copy(alpha = 0.95f)
                     ),
                     shape = RoundedCornerShape(12.dp)
                 ) {
@@ -475,29 +650,33 @@ fun ZonesScreen(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .background(
-                                    if (drawMode) AmberAccent else SuccessGreen,
-                                    CircleShape
-                                )
-                        )
+                        if (isRecognizing || isLocating) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                                color = EmeraldPrimary
+                            )
+                        } else {
+                            Box(
+                                Modifier
+                                    .size(8.dp)
+                                    .background(
+                                        when (mapMode) {
+                                            ZoneMapMode.RECOGNIZE -> EmeraldPrimary
+                                            ZoneMapMode.MANUAL -> AmberAccent
+                                            ZoneMapMode.EDIT -> SuccessGreen
+                                            ZoneMapMode.BROWSE -> TextMuted
+                                        },
+                                        CircleShape
+                                    )
+                            )
+                        }
                         Spacer(Modifier.width(7.dp))
                         Text(
-                            text = when {
-                                drawMode && drawnPoints.isEmpty() ->
-                                    "اضغط على الخريطة لإضافة أول نقطة"
-                                drawMode ->
-                                    "تحديد يدوي • ${drawnPoints.size} نقطة"
-                                selectionClosed && drawnPoints.size >= 3 ->
-                                    "Zone جاهز للحفظ • ${drawnPoints.size} نقطة"
-                                else ->
-                                    "حرّك وكبّر الخريطة بحرية"
-                            },
-                            fontSize = 11.sp,
+                            text = mapMessage,
                             color = TextPrimary,
-                            fontWeight = FontWeight.Medium
+                            fontSize = 10.sp,
+                            maxLines = 2
                         )
                     }
                 }
@@ -505,112 +684,179 @@ fun ZonesScreen(
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(10.dp),
+                        .padding(9.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Button(
-                            onClick = { requestLocation() },
+                            onClick = {
+                                mapMode =
+                                    if (mapMode == ZoneMapMode.RECOGNIZE) ZoneMapMode.BROWSE
+                                    else ZoneMapMode.RECOGNIZE
+                                mapMessage =
+                                    if (mapMode == ZoneMapMode.RECOGNIZE)
+                                        "اضغط داخل المنطقة التي تريد إضافتها"
+                                    else "وضع اختيار المناطق متوقف"
+                            },
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = DarkCard.copy(alpha = 0.95f)
+                                containerColor =
+                                    if (mapMode == ZoneMapMode.RECOGNIZE)
+                                        EmeraldPrimary
+                                    else DarkCard.copy(alpha = 0.95f)
                             ),
-                            shape = RoundedCornerShape(14.dp)
-                        ) {
-                            if (isLocating) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(16.dp),
-                                    strokeWidth = 2.dp,
-                                    color = EmeraldPrimary
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Default.MyLocation,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(17.dp)
-                                )
-                            }
-                            Spacer(Modifier.width(6.dp))
-                            Text("موقعي", fontSize = 11.sp)
-                        }
-
-                        Button(
-                            onClick = { createAutomaticZonePreview() },
-                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
-                            shape = RoundedCornerShape(14.dp)
+                            shape = RoundedCornerShape(13.dp)
                         ) {
                             Text(
-                                "تحديد تلقائي",
+                                "اختيار منطقة",
+                                fontSize = 10.sp,
                                 color = Color.White,
-                                fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold
                             )
                         }
 
+                        Button(
+                            onClick = { recognizeCurrentArea() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = DarkCard.copy(alpha = 0.95f)
+                            ),
+                            shape = RoundedCornerShape(13.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.MyLocation,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("منطقتي", fontSize = 10.sp)
+                        }
+
                         OutlinedButton(
                             onClick = {
-                                drawnPoints.clear()
-                                selectionClosed = false
-                                drawMode = true
+                                resetDraft()
+                                mapMode = ZoneMapMode.MANUAL
+                                mapMessage = "اضغط نقاط حدود المنطقة يدويًا"
                                 renderMap(mapViewInstance)
                             },
-                            shape = RoundedCornerShape(14.dp)
+                            shape = RoundedCornerShape(13.dp)
                         ) {
-                            Text("يدوي", fontSize = 11.sp, color = TextPrimary)
+                            Text("يدوي", fontSize = 10.sp, color = TextPrimary)
                         }
                     }
 
-                    if (drawMode) {
+                    if (previewGroups.isNotEmpty() && mapMode != ZoneMapMode.MANUAL) {
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedButton(
+                                onClick = { mergeSelectedAreas() },
+                                enabled = selectedAreaIds.size >= 2 || previewGroups.size >= 2,
+                                shape = RoundedCornerShape(13.dp)
+                            ) {
+                                Text("دمج", fontSize = 10.sp, color = TextPrimary)
+                            }
+
+                            OutlinedButton(
+                                onClick = { startEditingPreview() },
+                                shape = RoundedCornerShape(13.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Edit,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(Modifier.width(3.dp))
+                                Text("تعديل", fontSize = 10.sp, color = TextPrimary)
+                            }
+
+                            if (mapMode == ZoneMapMode.EDIT) {
+                                Button(
+                                    onClick = {
+                                        mapMode = ZoneMapMode.BROWSE
+                                        mapMessage = "تم إنهاء التعديل • راجع الحدود ثم احفظ"
+                                        renderMap(mapViewInstance)
+                                    },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = SuccessGreen
+                                    ),
+                                    shape = RoundedCornerShape(13.dp)
+                                ) {
+                                    Text(
+                                        "إنهاء",
+                                        fontSize = 10.sp,
+                                        color = DarkBackground,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                if (previewGroups.size > 1) {
+                                    TextButton(
+                                        onClick = {
+                                            editingGroupIndex =
+                                                (editingGroupIndex + 1) % previewGroups.size
+                                            mapMessage =
+                                                "تعديل الجزء \${editingGroupIndex + 1} من \${previewGroups.size}"
+                                            renderMap(mapViewInstance)
+                                        }
+                                    ) {
+                                        Text(
+                                            "\${editingGroupIndex + 1}/\${previewGroups.size}",
+                                            color = AmberAccent,
+                                            fontSize = 10.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (mapMode == ZoneMapMode.MANUAL) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             OutlinedButton(
                                 onClick = {
-                                    if (drawnPoints.isNotEmpty()) {
-                                        drawnPoints.removeAt(drawnPoints.lastIndex)
+                                    if (manualPoints.isNotEmpty()) {
+                                        manualPoints.removeAt(manualPoints.lastIndex)
                                         renderMap(mapViewInstance)
                                     }
                                 },
-                                enabled = drawnPoints.isNotEmpty(),
-                                shape = RoundedCornerShape(14.dp)
+                                enabled = manualPoints.isNotEmpty(),
+                                shape = RoundedCornerShape(13.dp)
                             ) {
-                                Text("تراجع", fontSize = 11.sp, color = TextPrimary)
+                                Text("تراجع", fontSize = 10.sp, color = TextPrimary)
                             }
 
                             Button(
                                 onClick = {
-                                    if (drawnPoints.size >= 3) {
-                                        drawMode = false
-                                        selectionClosed = true
+                                    if (manualPoints.size >= 3) {
+                                        previewGroups.clear()
+                                        previewGroups.add(manualPoints.toList())
+                                        manualPoints.clear()
+                                        selectedNames.clear()
+                                        selectedAreaIds.clear()
+                                        zoneNameInput = "منطقة مخصصة"
+                                        mapMode = ZoneMapMode.BROWSE
+                                        mapMessage = "تم إنهاء الرسم اليدوي"
                                         renderMap(mapViewInstance)
                                     }
                                 },
-                                enabled = drawnPoints.size >= 3,
+                                enabled = manualPoints.size >= 3,
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = EmeraldPrimary
                                 ),
-                                shape = RoundedCornerShape(14.dp)
+                                shape = RoundedCornerShape(13.dp)
                             ) {
                                 Text(
-                                    "إنهاء",
+                                    "إنهاء الرسم",
+                                    fontSize = 10.sp,
                                     color = Color.White,
-                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold
                                 )
-                            }
-
-                            TextButton(
-                                onClick = {
-                                    drawMode = false
-                                    selectionClosed = false
-                                    drawnPoints.clear()
-                                    renderMap(mapViewInstance)
-                                }
-                            ) {
-                                Text("إلغاء", color = DangerRed, fontSize = 11.sp)
                             }
                         }
                     }
@@ -624,7 +870,7 @@ fun ZonesScreen(
                 colors = CardDefaults.cardColors(containerColor = DarkCard),
                 shape = RoundedCornerShape(16.dp)
             ) {
-                Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Column(modifier = Modifier.padding(12.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -632,76 +878,94 @@ fun ZonesScreen(
                     ) {
                         Column {
                             Text(
-                                "نصف قطر التحديد التلقائي",
+                                "التحديد الذكي",
                                 color = TextPrimary,
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 13.sp
                             )
                             Text(
-                                "Zone دائري حول موقعك الحالي",
-                                color = TextMuted,
+                                if (selectedNames.isEmpty())
+                                    "يتعرف على المنطقة وحدودها تلقائيًا من الخريطة"
+                                else
+                                    "المحدد: \${selectedNames.distinct().joinToString(" • ")}",
+                                color = TextSecondary,
+                                fontSize = 10.sp,
+                                maxLines = 2
+                            )
+                        }
+
+                        TextButton(onClick = { showRadiusTools = !showRadiusTools }) {
+                            Text(
+                                if (showRadiusTools) "إخفاء الدائرة" else "تحديد بنصف قطر",
+                                color = AmberAccent,
                                 fontSize = 10.sp
                             )
                         }
-                        Text(
-                            String.format(Locale.US, "%.1f كم", autoRadiusKm),
-                            color = EmeraldPrimary,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp
-                        )
                     }
 
-                    Slider(
-                        value = autoRadiusKm,
-                        onValueChange = { autoRadiusKm = it },
-                        valueRange = 0.5f..20f,
-                        steps = 38,
-                        colors = SliderDefaults.colors(
-                            thumbColor = EmeraldPrimary,
-                            activeTrackColor = EmeraldPrimary,
-                            inactiveTrackColor = BorderDark
-                        )
-                    )
-
-                    locationMessage?.let { message ->
-                        Text(
-                            text = message,
-                            color = if (currentLocation != null) SuccessGreen else AmberAccent,
-                            fontSize = 10.sp
-                        )
+                    if (showRadiusTools) {
+                        Spacer(Modifier.height(7.dp))
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Slider(
+                                value = radiusKm,
+                                onValueChange = { radiusKm = it },
+                                valueRange = 0.5f..20f,
+                                steps = 38,
+                                modifier = Modifier.weight(1f),
+                                colors = SliderDefaults.colors(
+                                    thumbColor = EmeraldPrimary,
+                                    activeTrackColor = EmeraldPrimary,
+                                    inactiveTrackColor = BorderDark
+                                )
+                            )
+                            Text(
+                                String.format(Locale.US, "%.1f كم", radiusKm),
+                                color = EmeraldPrimary,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Button(
+                            onClick = { createRadiusZone() },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(containerColor = BorderDark)
+                        ) {
+                            Text("إنشاء Zone دائري حول موقعي", color = TextPrimary)
+                        }
                     }
                 }
             }
 
-            // Zones List Header
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                    .padding(horizontal = 16.dp, vertical = 7.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "المناطق المحفوظة (${zones.size})",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary
+                    "المناطق المحفوظة (\${zones.size})",
+                    color = TextPrimary,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
                 )
                 Text(
-                    text = "تفعيل / تعطيل الزون",
-                    fontSize = 12.sp,
-                    color = TextSecondary
+                    "اضغط المنطقة للتركيز عليها",
+                    color = TextMuted,
+                    fontSize = 9.sp
                 )
             }
 
-            // Zones LazyColumn
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
                     .padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                contentPadding = PaddingValues(bottom = 80.dp)
+                verticalArrangement = Arrangement.spacedBy(9.dp),
+                contentPadding = PaddingValues(bottom = 90.dp)
             ) {
                 if (zones.isEmpty()) {
                     item {
@@ -714,7 +978,11 @@ fun ZonesScreen(
                                 modifier = Modifier.padding(16.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                Icon(Icons.Default.Layers, contentDescription = null, tint = TextMuted)
+                                Icon(
+                                    Icons.Default.Layers,
+                                    contentDescription = null,
+                                    tint = TextMuted
+                                )
                                 Spacer(Modifier.height(7.dp))
                                 Text(
                                     "لا توجد Zones محفوظة",
@@ -722,7 +990,7 @@ fun ZonesScreen(
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    "استخدم «موقعي» ثم «تحديد تلقائي»، أو ارسم المنطقة يدويًا.",
+                                    "اختر منطقة من الخريطة وسيتم رسم حدودها تلقائيًا.",
                                     color = TextSecondary,
                                     fontSize = 10.sp
                                 )
@@ -732,7 +1000,9 @@ fun ZonesScreen(
                 }
 
                 items(zones, key = { it.id }) { zone ->
-                    val pointCount = ZoneEngine.parsePolygonJson(zone.polygonJson).size
+                    val groups = ZoneEngine.parsePolygonGroups(zone.polygonJson)
+                    val pointCount = groups.sumOf { it.size }
+
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -740,66 +1010,84 @@ fun ZonesScreen(
                         colors = CardDefaults.cardColors(containerColor = DarkCard),
                         shape = RoundedCornerShape(14.dp)
                     ) {
-                        Column(modifier = Modifier.padding(14.dp)) {
+                        Column(modifier = Modifier.padding(13.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     Icon(
                                         Icons.Default.Layers,
                                         contentDescription = null,
                                         tint = if (zone.isEnabled) EmeraldPrimary else TextMuted
                                     )
-                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Spacer(Modifier.width(9.dp))
                                     Column {
                                         Text(
-                                            text = zone.name,
-                                            fontSize = 14.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = TextPrimary
+                                            zone.name,
+                                            color = TextPrimary,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Bold
                                         )
                                         Text(
-                                            text = "مضلع من $pointCount نقاط",
-                                            fontSize = 11.sp,
-                                            color = TextSecondary
+                                            if (groups.size <= 1)
+                                                "\${pointCount} نقطة حدود"
+                                            else
+                                                "\${groups.size} أجزاء • \${pointCount} نقطة",
+                                            color = TextSecondary,
+                                            fontSize = 10.sp
                                         )
                                     }
                                 }
 
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Switch(
-                                        checked = zone.isEnabled,
-                                        onCheckedChange = { isChecked ->
-                                            scope.launch {
-                                                app.zoneRepository.updateZone(zone.copy(isEnabled = isChecked))
-                                            }
-                                        },
-                                        colors = SwitchDefaults.colors(
-                                            checkedThumbColor = EmeraldPrimary,
-                                            checkedTrackColor = EmeraldPrimary.copy(alpha = 0.3f)
-                                        )
+                                IconButton(onClick = { loadZoneForEditing(zone) }) {
+                                    Icon(
+                                        Icons.Default.Edit,
+                                        contentDescription = "تعديل",
+                                        tint = AmberAccent
                                     )
-                                    IconButton(
-                                        onClick = {
-                                            scope.launch {
-                                                app.zoneRepository.deleteZone(zone)
-                                            }
+                                }
+
+                                Switch(
+                                    checked = zone.isEnabled,
+                                    onCheckedChange = { enabled ->
+                                        scope.launch {
+                                            app.zoneRepository.updateZone(
+                                                zone.copy(isEnabled = enabled)
+                                            )
                                         }
-                                    ) {
-                                        Icon(Icons.Default.Delete, contentDescription = "حذف", tint = DangerRed)
+                                    },
+                                    colors = SwitchDefaults.colors(
+                                        checkedThumbColor = EmeraldPrimary,
+                                        checkedTrackColor = EmeraldPrimary.copy(alpha = 0.3f)
+                                    )
+                                )
+
+                                IconButton(
+                                    onClick = {
+                                        scope.launch {
+                                            app.zoneRepository.deleteZone(zone)
+                                        }
                                     }
+                                ) {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        contentDescription = "حذف",
+                                        tint = DangerRed
+                                    )
                                 }
                             }
 
                             if (zone.allowedKeywords.isNotBlank()) {
-                                Spacer(modifier = Modifier.height(6.dp))
                                 Text(
-                                    text = "الكلمات المفتاحية: ${zone.allowedKeywords}",
-                                    fontSize = 11.sp,
+                                    "المناطق: \${zone.allowedKeywords}",
                                     color = TextMuted,
-                                    lineHeight = 15.sp
+                                    fontSize = 9.sp,
+                                    maxLines = 2
                                 )
                             }
                         }
@@ -809,34 +1097,38 @@ fun ZonesScreen(
         }
     }
 
-    // Create Zone Dialog
-    if (showCreateDialog) {
+    if (showSaveDialog) {
         AlertDialog(
-            onDismissRequest = { showCreateDialog = false },
-            title = { Text("إنشاء منطقة عمل جديدة", fontWeight = FontWeight.Bold) },
+            onDismissRequest = { showSaveDialog = false },
+            title = {
+                Text(
+                    if (editingExistingZone == null) "حفظ منطقة العمل" else "حفظ التعديلات",
+                    fontWeight = FontWeight.Bold
+                )
+            },
             text = {
                 Column {
                     Text(
-                        text = if (drawnPoints.size >= 3) "تم رسم مضلع من ${drawnPoints.size} نقاط على الخريطة" else "تنبيه: يمكنك حفظ المنطقة بالكلمات المفتاحية أو إضافة نقاط على الخريطة",
-                        fontSize = 12.sp,
-                        color = if (drawnPoints.size >= 3) SuccessGreen else AmberAccent
+                        "الحدود: \${previewGroups.size} جزء • \${previewGroups.sumOf { it.size }} نقطة",
+                        color = SuccessGreen,
+                        fontSize = 11.sp
                     )
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(Modifier.height(9.dp))
                     OutlinedTextField(
                         value = zoneNameInput,
                         onValueChange = { zoneNameInput = it },
-                        label = { Text("اسم المنطقة (مثال: شرق الإسكندرية)") },
+                        label = { Text("اسم الـZone") },
                         modifier = Modifier.fillMaxWidth(),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = EmeraldPrimary,
                             unfocusedBorderColor = BorderDark
                         )
                     )
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Spacer(Modifier.height(9.dp))
                     OutlinedTextField(
                         value = zoneKeywordsInput,
                         onValueChange = { zoneKeywordsInput = it },
-                        label = { Text("الكلمات المفتاحية (مفصولة بفاصلة)") },
+                        label = { Text("أسماء المناطق / كلمات مفتاحية") },
                         modifier = Modifier.fillMaxWidth(),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = EmeraldPrimary,
@@ -848,42 +1140,50 @@ fun ZonesScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        if (zoneNameInput.isNotBlank()) {
+                        if (zoneNameInput.isNotBlank() && previewGroups.isNotEmpty()) {
                             scope.launch {
-                                // Serialize points
-                                val jsonArr = JSONArray()
-                                for (p in drawnPoints) {
-                                    val obj = JSONObject()
-                                    obj.put("latitude", p.latitude)
-                                    obj.put("longitude", p.longitude)
-                                    jsonArr.put(obj)
+                                val polygonJson = ZoneEngine.serializePolygonGroups(
+                                    previewAsModel()
+                                )
+
+                                val existing = editingExistingZone
+                                if (existing == null) {
+                                    app.zoneRepository.addZone(
+                                        WorkZone(
+                                            name = zoneNameInput.trim(),
+                                            polygonJson = polygonJson,
+                                            isEnabled = true,
+                                            allowedKeywords = zoneKeywordsInput.trim()
+                                        )
+                                    )
+                                } else {
+                                    app.zoneRepository.updateZone(
+                                        existing.copy(
+                                            name = zoneNameInput.trim(),
+                                            polygonJson = polygonJson,
+                                            allowedKeywords = zoneKeywordsInput.trim()
+                                        )
+                                    )
                                 }
 
-                                app.zoneRepository.addZone(
-                                    WorkZone(
-                                        name = zoneNameInput.trim(),
-                                        polygonJson = jsonArr.toString(),
-                                        isEnabled = true,
-                                        allowedKeywords = zoneKeywordsInput.trim()
-                                    )
-                                )
-                                showCreateDialog = false
-                                zoneNameInput = ""
-                                zoneKeywordsInput = ""
-                                drawnPoints.clear()
-                                drawMode = false
-                                selectionClosed = false
+                                showSaveDialog = false
+                                resetDraft()
+                                mapMessage = "تم حفظ الـZone"
                                 renderMap(mapViewInstance)
                             }
                         }
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary)
                 ) {
-                    Text("حفظ المنطقة", color = DarkBackground, fontWeight = FontWeight.Bold)
+                    Text(
+                        if (editingExistingZone == null) "حفظ" else "حفظ التعديل",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showCreateDialog = false }) {
+                TextButton(onClick = { showSaveDialog = false }) {
                     Text("إلغاء", color = TextSecondary)
                 }
             },
