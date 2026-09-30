@@ -354,31 +354,49 @@ fun ZonesScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("مناطق العمل (Work Zones)", fontWeight = FontWeight.Bold, color = TextPrimary) },
+                title = {
+                    Column {
+                        Text("مناطق العمل", fontWeight = FontWeight.Bold, color = TextPrimary)
+                        Text("Interactive Work Zones", fontSize = 10.sp, color = TextMuted)
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = { navController.popBackStack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "رجوع", tint = TextPrimary)
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "رجوع",
+                            tint = TextPrimary
+                        )
                     }
                 },
                 actions = {
-                    IconButton(onClick = {
-                        drawMode.value = false
-                        drawnPoints.clear()
-                        redrawZoneSelection(mapViewInstance, closed = false)
-                    }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "مسح النقاط", tint = AmberAccent)
+                    IconButton(
+                        onClick = {
+                            drawMode = false
+                            selectionClosed = false
+                            drawnPoints.clear()
+                            renderMap(mapViewInstance)
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = "مسح التحديد",
+                            tint = AmberAccent
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = DarkBackground)
             )
         },
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = { showCreateDialog = true },
-                containerColor = EmeraldPrimary,
-                contentColor = DarkBackground
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "إضافة منطقة")
+            if (drawnPoints.size >= 3 || zoneKeywordsInput.isNotBlank()) {
+                FloatingActionButton(
+                    onClick = { showCreateDialog = true },
+                    containerColor = EmeraldPrimary,
+                    contentColor = Color.White
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "حفظ منطقة")
+                }
             }
         },
         containerColor = DarkBackground
@@ -388,40 +406,48 @@ fun ZonesScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // Interactive Map Header Card
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(260.dp)
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .border(1.dp, BorderDark, RoundedCornerShape(16.dp))
+                    .height(310.dp)
+                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .border(1.dp, BorderDark, RoundedCornerShape(18.dp))
             ) {
                 AndroidView(
                     factory = { ctx ->
                         MapView(ctx).apply {
                             setTileSource(TileSourceFactory.MAPNIK)
                             setMultiTouchControls(true)
-                            controller.setZoom(13.0)
-                            // Default to Alexandria center (31.2001, 29.9187)
-                            controller.setCenter(GeoPoint(31.2200, 29.9500))
+                            setBuiltInZoomControls(false)
+                            controller.setZoom(11.5)
+                            controller.setCenter(GeoPoint(30.0444, 31.2357))
 
-                            // Precise point-by-point zone drawing. A tap adds one corner;
-                            // dragging still pans the map because touch-move events are not consumed.
                             val touchOverlay = object : org.osmdroid.views.overlay.Overlay() {
-                                override fun onSingleTapConfirmed(event: MotionEvent?, mapView: MapView?): Boolean {
-                                    if (!drawMode.value || event == null || mapView == null) return false
+                                override fun onSingleTapConfirmed(
+                                    event: MotionEvent?,
+                                    mapView: MapView?
+                                ): Boolean {
+                                    if (!drawMode || event == null || mapView == null) return false
 
                                     val point = mapView.projection
                                         .fromPixels(event.x.toInt(), event.y.toInt()) as GeoPoint
+
                                     drawnPoints.add(point)
-                                    redrawZoneSelection(mapView, closed = false)
+                                    selectionClosed = false
+                                    renderMap(mapView)
                                     return true
                                 }
                             }
+
                             overlays.add(touchOverlay)
                             mapViewInstance = this
+                            renderMap(this)
                         }
+                    },
+                    update = { map ->
+                        mapViewInstance = map
+                        renderMap(map)
                     },
                     modifier = Modifier.fillMaxSize()
                 )
@@ -430,79 +456,209 @@ fun ZonesScreen(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(10.dp),
-                    colors = CardDefaults.cardColors(containerColor = DarkCard.copy(alpha = 0.94f)),
+                    colors = CardDefaults.cardColors(
+                        containerColor = DarkCard.copy(alpha = 0.94f)
+                    ),
                     shape = RoundedCornerShape(12.dp)
                 ) {
-                    Text(
-                        text = when {
-                            drawMode.value && drawnPoints.isEmpty() -> "اضغط على أركان المنطقة نقطة بنقطة"
-                            drawMode.value -> "تم تحديد ${drawnPoints.size} نقطة • اضغط إنهاء بعد 3 نقاط أو أكثر"
-                            drawnPoints.size >= 3 -> "✓ الزون جاهز — راجعه ثم احفظه"
-                            else -> "حرّك الخريطة للمكان المطلوب ثم ابدأ التحديد"
-                        },
-                        fontSize = 11.sp,
-                        color = if (drawMode.value) AmberAccent else TextPrimary,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
-                        fontWeight = FontWeight.Medium
-                    )
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(
+                                    if (drawMode) AmberAccent else SuccessGreen,
+                                    CircleShape
+                                )
+                        )
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                            text = when {
+                                drawMode && drawnPoints.isEmpty() ->
+                                    "اضغط على الخريطة لإضافة أول نقطة"
+                                drawMode ->
+                                    "تحديد يدوي • ${drawnPoints.size} نقطة"
+                                selectionClosed && drawnPoints.size >= 3 ->
+                                    "Zone جاهز للحفظ • ${drawnPoints.size} نقطة"
+                                else ->
+                                    "حرّك وكبّر الخريطة بحرية"
+                            },
+                            fontSize = 11.sp,
+                            color = TextPrimary,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
 
-                Row(
+                Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(bottom = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    if (!drawMode.value) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Button(
-                            onClick = {
-                                drawnPoints.clear()
-                                redrawZoneSelection(mapViewInstance, closed = false)
-                                drawMode.value = true
-                            },
+                            onClick = { requestLocation() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = DarkCard.copy(alpha = 0.95f)
+                            ),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            if (isLocating) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = EmeraldPrimary
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Default.MyLocation,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            Text("موقعي", fontSize = 11.sp)
+                        }
+
+                        Button(
+                            onClick = { createAutomaticZonePreview() },
                             colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
                             shape = RoundedCornerShape(14.dp)
                         ) {
-                            Text("ابدأ التحديد", color = Color.White, fontWeight = FontWeight.Bold)
+                            Text(
+                                "تحديد تلقائي",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
-                    } else {
+
                         OutlinedButton(
                             onClick = {
-                                if (drawnPoints.isNotEmpty()) {
-                                    drawnPoints.removeAt(drawnPoints.lastIndex)
-                                    redrawZoneSelection(mapViewInstance, closed = false)
-                                }
-                            },
-                            enabled = drawnPoints.isNotEmpty(),
-                            shape = RoundedCornerShape(14.dp)
-                        ) {
-                            Text("تراجع", color = TextPrimary)
-                        }
-
-                        Button(
-                            onClick = {
-                                if (drawnPoints.size >= 3) {
-                                    drawMode.value = false
-                                    redrawZoneSelection(mapViewInstance, closed = true)
-                                }
-                            },
-                            enabled = drawnPoints.size >= 3,
-                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
-                            shape = RoundedCornerShape(14.dp)
-                        ) {
-                            Text("إنهاء", color = Color.White, fontWeight = FontWeight.Bold)
-                        }
-
-                        TextButton(
-                            onClick = {
-                                drawMode.value = false
                                 drawnPoints.clear()
-                                redrawZoneSelection(mapViewInstance, closed = false)
-                            }
+                                selectionClosed = false
+                                drawMode = true
+                                renderMap(mapViewInstance)
+                            },
+                            shape = RoundedCornerShape(14.dp)
                         ) {
-                            Text("إلغاء", color = DangerRed)
+                            Text("يدوي", fontSize = 11.sp, color = TextPrimary)
                         }
+                    }
+
+                    if (drawMode) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    if (drawnPoints.isNotEmpty()) {
+                                        drawnPoints.removeAt(drawnPoints.lastIndex)
+                                        renderMap(mapViewInstance)
+                                    }
+                                },
+                                enabled = drawnPoints.isNotEmpty(),
+                                shape = RoundedCornerShape(14.dp)
+                            ) {
+                                Text("تراجع", fontSize = 11.sp, color = TextPrimary)
+                            }
+
+                            Button(
+                                onClick = {
+                                    if (drawnPoints.size >= 3) {
+                                        drawMode = false
+                                        selectionClosed = true
+                                        renderMap(mapViewInstance)
+                                    }
+                                },
+                                enabled = drawnPoints.size >= 3,
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = EmeraldPrimary
+                                ),
+                                shape = RoundedCornerShape(14.dp)
+                            ) {
+                                Text(
+                                    "إنهاء",
+                                    color = Color.White,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            TextButton(
+                                onClick = {
+                                    drawMode = false
+                                    selectionClosed = false
+                                    drawnPoints.clear()
+                                    renderMap(mapViewInstance)
+                                }
+                            ) {
+                                Text("إلغاء", color = DangerRed, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp),
+                colors = CardDefaults.cardColors(containerColor = DarkCard),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                "نصف قطر التحديد التلقائي",
+                                color = TextPrimary,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp
+                            )
+                            Text(
+                                "Zone دائري حول موقعك الحالي",
+                                color = TextMuted,
+                                fontSize = 10.sp
+                            )
+                        }
+                        Text(
+                            String.format(Locale.US, "%.1f كم", autoRadiusKm),
+                            color = EmeraldPrimary,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
+                    }
+
+                    Slider(
+                        value = autoRadiusKm,
+                        onValueChange = { autoRadiusKm = it },
+                        valueRange = 0.5f..20f,
+                        steps = 38,
+                        colors = SliderDefaults.colors(
+                            thumbColor = EmeraldPrimary,
+                            activeTrackColor = EmeraldPrimary,
+                            inactiveTrackColor = BorderDark
+                        )
+                    )
+
+                    locationMessage?.let { message ->
+                        Text(
+                            text = message,
+                            color = if (currentLocation != null) SuccessGreen else AmberAccent,
+                            fontSize = 10.sp
+                        )
                     }
                 }
             }
