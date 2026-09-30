@@ -281,10 +281,12 @@ class InDriveStateMachine(
                     val eligible = parsed.quickOfferButtons
                         .filterKeys { it >= calc.minimumPrice }
 
+                    // Use a preset only when it is essentially the price calculated by
+                    // the negotiation engine. Otherwise open the pencil/custom offer;
+                    // choosing a much lower preset would defeat Start Margin.
                     val quick = eligible.entries
-                        .filter { it.key >= target }
-                        .minByOrNull { it.key }
-                        ?: eligible.entries.maxByOrNull { it.key }
+                        .minByOrNull { kotlin.math.abs(it.key - target) }
+                        ?.takeIf { kotlin.math.abs(it.key - target) <= 2.0 }
 
                     if (quick != null) {
                         pendingCounterPrice = null
