@@ -24,6 +24,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,6 +33,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 class RidePilotAccessibilityService : AccessibilityService() {
@@ -62,9 +64,10 @@ class RidePilotAccessibilityService : AccessibilityService() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val lastEventByPackage = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    private val debounceMs = 80L
+    private val debounceMs = 25L
     private val processing = AtomicBoolean(false)
     private val pendingRecheck = AtomicBoolean(false)
+    private val postGestureRecheckToken = AtomicInteger(0)
 
     private val stateMachine by lazy {
         InDriveStateMachine(
@@ -94,6 +97,8 @@ class RidePilotAccessibilityService : AccessibilityService() {
         _isServiceConnected.value = true
         serviceScope.launch {
             RidePilotApplication.instance.settingsRepository.applyV3AutomationDefaultsOnce()
+            delay(120)
+            requestWindowProcessing()
         }
         Log.i(TAG, "RidePilot Accessibility Service Connected")
     }
@@ -162,6 +167,17 @@ class RidePilotAccessibilityService : AccessibilityService() {
                 _activeTarget.value = AppTarget.UBER
                 processUberOffer(app, offer)
                 ensureOverlayRunning()
+                return
+            }
+
+            // If an Uber window is already above inDrive but its text is still
+            // animating/loading, never fall through and tap inDrive underneath it.
+            if (nodes.isNotEmpty()) {
+                _activeTarget.value = AppTarget.UBER
+                _latestUberAnalysis.value = null
+                _automationStatus.value = "Uber: جاري قراءة الطلب"
+                ensureOverlayRunning()
+                schedulePostGestureRechecks()
                 return
             }
         }
@@ -306,6 +322,23 @@ class RidePilotAccessibilityService : AccessibilityService() {
         return if (activeRoot?.packageName?.toString() == packageName) activeRoot else null
     }
 
+    private fun schedulePostGestureRechecks() {
+        val token = postGestureRecheckToken.incrementAndGet()
+        serviceScope.launch {
+            delay(90)
+            if (postGestureRecheckToken.get() != token) return@launch
+            requestWindowProcessing()
+
+            delay(160)
+            if (postGestureRecheckToken.get() != token) return@launch
+            requestWindowProcessing()
+
+            delay(300)
+            if (postGestureRecheckToken.get() != token) return@launch
+            requestWindowProcessing()
+        }
+    }
+
     private suspend fun executeGesture(action: InDriveStateMachine.GestureAction): Boolean =
         withContext(Dispatchers.Main.immediate) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
@@ -320,6 +353,8 @@ class RidePilotAccessibilityService : AccessibilityService() {
                         val gesture = GestureDescription.Builder().addStroke(stroke).build()
                         dispatchGesture(gesture, object : GestureResultCallback() {
                             override fun onCompleted(gestureDescription: GestureDescription?) {
+                                schedulePostGestureRechecks()
+                                schedulePostGestureRechecks()
                                 if (cont.isActive) cont.resume(true)
                             }
                             override fun onCancelled(gestureDescription: GestureDescription?) {
@@ -354,6 +389,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
                             current = if (!clicked) current.parent else null
                             hops++
                         }
+                        if (clicked) schedulePostGestureRechecks()
                         if (cont.isActive) cont.resume(clicked)
                     }
 
@@ -365,11 +401,13 @@ class RidePilotAccessibilityService : AccessibilityService() {
                             )
                         }
                         val ok = action.node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                        if (ok) schedulePostGestureRechecks()
                         if (cont.isActive) cont.resume(ok)
                     }
 
                     is InDriveStateMachine.GestureAction.Back -> {
                         val ok = performGlobalAction(GLOBAL_ACTION_BACK)
+                        if (ok) schedulePostGestureRechecks()
                         if (cont.isActive) cont.resume(ok)
                     }
                 }
