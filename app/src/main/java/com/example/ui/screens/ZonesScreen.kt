@@ -625,10 +625,72 @@ fun ZonesScreen(navController: NavController) {
                 .fillMaxSize()
                 .padding(padding)
         ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                colors = CardDefaults.cardColors(containerColor = DarkCard),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(modifier = Modifier.padding(vertical = 10.dp)) {
+                    Text(
+                        "مناطق الإسكندرية",
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                        color = TextPrimary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        "اضغط اسم المنطقة لتحديدها • اضغط مرة أخرى لإلغائها",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
+                        color = TextMuted,
+                        fontSize = 9.sp
+                    )
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(7.dp)
+                    ) {
+                        items(
+                            AlexandriaZoneCatalog.areas,
+                            key = { it.id }
+                        ) { area ->
+                            val selected = area.id in selectedAreaIds
+                            if (selected) {
+                                Button(
+                                    onClick = { togglePreset(area) },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = EmeraldPrimary
+                                    ),
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Text(
+                                        area.name,
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            } else {
+                                OutlinedButton(
+                                    onClick = { togglePreset(area) },
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Text(
+                                        area.name,
+                                        color = TextPrimary,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(330.dp)
+                    .height(285.dp)
                     .padding(horizontal = 14.dp, vertical = 8.dp)
                     .clip(RoundedCornerShape(18.dp))
                     .border(1.dp, BorderDark, RoundedCornerShape(18.dp))
@@ -748,33 +810,7 @@ fun ZonesScreen(navController: NavController) {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Button(
-                            onClick = {
-                                mapMode =
-                                    if (mapMode == ZoneMapMode.RECOGNIZE) ZoneMapMode.BROWSE
-                                    else ZoneMapMode.RECOGNIZE
-                                mapMessage =
-                                    if (mapMode == ZoneMapMode.RECOGNIZE)
-                                        "اضغط داخل المنطقة التي تريد إضافتها"
-                                    else "وضع اختيار المناطق متوقف"
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor =
-                                    if (mapMode == ZoneMapMode.RECOGNIZE)
-                                        EmeraldPrimary
-                                    else DarkCard.copy(alpha = 0.95f)
-                            ),
-                            shape = RoundedCornerShape(13.dp)
-                        ) {
-                            Text(
-                                "اختيار منطقة",
-                                fontSize = 10.sp,
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        Button(
-                            onClick = { recognizeCurrentArea() },
+                            onClick = { requestLocation() },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = DarkCard.copy(alpha = 0.95f)
                             ),
@@ -786,7 +822,7 @@ fun ZonesScreen(navController: NavController) {
                                 modifier = Modifier.size(15.dp)
                             )
                             Spacer(Modifier.width(4.dp))
-                            Text("منطقتي", fontSize = 10.sp)
+                            Text("موقعي", fontSize = 10.sp)
                         }
 
                         OutlinedButton(
@@ -798,7 +834,24 @@ fun ZonesScreen(navController: NavController) {
                             },
                             shape = RoundedCornerShape(13.dp)
                         ) {
-                            Text("يدوي", fontSize = 10.sp, color = TextPrimary)
+                            Text("رسم يدوي", fontSize = 10.sp, color = TextPrimary)
+                        }
+
+                        if (selectedAreaIds.size >= 2 || previewGroups.size >= 2) {
+                            Button(
+                                onClick = { mergeSelectedAreas() },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = EmeraldPrimary
+                                ),
+                                shape = RoundedCornerShape(13.dp)
+                            ) {
+                                Text(
+                                    "دمج",
+                                    fontSize = 10.sp,
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
 
@@ -807,14 +860,6 @@ fun ZonesScreen(navController: NavController) {
                             horizontalArrangement = Arrangement.spacedBy(5.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            OutlinedButton(
-                                onClick = { mergeSelectedAreas() },
-                                enabled = selectedAreaIds.size >= 2 || previewGroups.size >= 2,
-                                shape = RoundedCornerShape(13.dp)
-                            ) {
-                                Text("دمج", fontSize = 10.sp, color = TextPrimary)
-                            }
-
                             OutlinedButton(
                                 onClick = { startEditingPreview() },
                                 shape = RoundedCornerShape(13.dp)
