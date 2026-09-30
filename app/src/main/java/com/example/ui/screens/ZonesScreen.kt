@@ -129,6 +129,7 @@ fun ZonesScreen(
     var locationMessage by remember { mutableStateOf<String?>(null) }
     var autoRadiusKm by remember { mutableStateOf(3f) }
     var locateAfterPermission by remember { mutableStateOf(false) }
+    var autoZoneAfterLocate by remember { mutableStateOf(false) }
 
     var hasLocationPermission by remember {
         mutableStateOf(
@@ -274,6 +275,7 @@ fun ZonesScreen(
 
         if (!hasLocationPermission) {
             locateAfterPermission = false
+            autoZoneAfterLocate = false
             locationMessage = "إذن الموقع مطلوب للتحديد التلقائي"
         }
     }
@@ -295,7 +297,8 @@ fun ZonesScreen(
     fun createAutomaticZonePreview() {
         val center = currentLocation
         if (center == null) {
-            locationMessage = "حدد موقعك أولًا ثم اضغط التحديد التلقائي"
+            autoZoneAfterLocate = true
+            locationMessage = "جار تحديد موقعك لإنشاء الـZone تلقائيًا…"
             requestLocation()
             return
         }
@@ -331,6 +334,13 @@ fun ZonesScreen(
         if (hasLocationPermission && locateAfterPermission) {
             locateAfterPermission = false
             locateNow()
+        }
+    }
+
+    LaunchedEffect(currentLocation, autoZoneAfterLocate) {
+        if (currentLocation != null && autoZoneAfterLocate) {
+            autoZoneAfterLocate = false
+            createAutomaticZonePreview()
         }
     }
 
