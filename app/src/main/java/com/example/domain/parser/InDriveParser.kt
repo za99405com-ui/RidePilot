@@ -358,7 +358,9 @@ object InDriveParser {
             pickupAddress = pickupFromMarkers ?: fallbackAddresses.getOrNull(0),
             destinationAddress = destinationFromMarkers ?: fallbackAddresses.getOrNull(1),
             confidence = when {
-                price != null && tripDistance != null && addresses.size >= 2 -> 95
+                price != null && tripDistance != null &&
+                    (pickupFromMarkers != null || fallbackAddresses.isNotEmpty()) &&
+                    (destinationFromMarkers != null || fallbackAddresses.size >= 2) -> 95
                 price != null && tripDistance != null -> 85
                 else -> 50
             },
