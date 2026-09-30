@@ -1,6 +1,7 @@
 package com.example.service
 
 import android.graphics.Rect
+import android.view.accessibility.AccessibilityNodeInfo
 import com.example.data.model.AutomationState
 import com.example.data.model.NegotiationConfig
 import com.example.data.model.PricingBand
@@ -12,6 +13,7 @@ import com.example.domain.engine.NegotiationEngine
 import com.example.domain.engine.PricingEngine
 import com.example.domain.engine.ZoneEngine
 import com.example.domain.parser.InDriveParser
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,9 +23,14 @@ class InDriveStateMachine(
     private val logger: suspend (action: String, reason: String, price: Double?, dist: Double?, conf: Int) -> Unit
 ) {
 
+    companion object {
+        private const val MIN_ACTION_CONFIDENCE = 80
+    }
+
     sealed class GestureAction {
         data class Tap(val x: Float, val y: Float) : GestureAction()
         data class Swipe(val startX: Float, val startY: Float, val endX: Float, val endY: Float, val durationMs: Long = 300) : GestureAction()
+        data class SetText(val node: AccessibilityNodeInfo, val text: String) : GestureAction()
         object Back : GestureAction()
     }
 
@@ -33,12 +40,14 @@ class InDriveStateMachine(
     private var currentAttemptCount = 0
     private var lastSwipedCardBounds: Rect? = null
     private var consecutiveErrors = 0
+    private var pendingCounterPrice: Double? = null
 
     fun reset() {
         _currentState.value = AutomationState.IDLE
         currentAttemptCount = 0
         lastSwipedCardBounds = null
         consecutiveErrors = 0
+        pendingCounterPrice = null
     }
 
     suspend fun processScreen(
@@ -58,8 +67,32 @@ class InDriveStateMachine(
             return
         }
 
-        // Rule 1: Always enforce OFFLINE
-        if (!parsed.isOffline && parsed.offlineButtonBounds != null) {
+        if (parsed.confidence < MIN_ACTION_CONFIDENCE) {
+            _currentState.value = AutomationState.ERROR_RECOVERY
+            logger(
+                "LOW_CONFIDENCE",
+                "تم إيقاف الأتمتة لهذه الشاشة لأن دقة التعرف ${parsed.confidence}% أقل من الحد الآمن ${MIN_ACTION_CONFIDENCE}%",
+                null,
+                null,
+                parsed.confidence
+            )
+            return
+        }
+
+        if (parsed.offlineButtonBounds == null) {
+            _currentState.value = AutomationState.ERROR_RECOVERY
+            logger(
+                "STATUS_UNKNOWN",
+                "تعذر التأكد من حالة الاتصال في inDrive؛ لن يتم تنفيذ أي حركة",
+                null,
+                null,
+                parsed.confidence
+            )
+            return
+        }
+
+        // Rule 1: Always enforce OFFLINE.
+        if (!parsed.isOffline) {
             _currentState.value = AutomationState.ENSURE_OFFLINE
             logger("ENSURE_OFFLINE", "تم رصد inDrive في وضع 'متصل'، جاري الضغط لإعادته 'غير متصل'", null, null, parsed.confidence)
             val btn = parsed.offlineButtonBounds
@@ -71,12 +104,11 @@ class InDriveStateMachine(
             InDriveParser.InDriveScreenType.REQUESTS_LIST -> {
                 _currentState.value = AutomationState.REQUESTS_PAGE
                 currentAttemptCount = 0
+                pendingCounterPrice = null
 
-                // Examine order cards
                 if (parsed.orderCards.isNotEmpty()) {
                     _currentState.value = AutomationState.READING_ORDERS
                     for (card in parsed.orderCards) {
-                        // Skip if already swiped this exact card recently
                         if (lastSwipedCardBounds == card.bounds) continue
 
                         _currentState.value = AutomationState.CHECKING_ZONE
@@ -88,8 +120,19 @@ class InDriveStateMachine(
                             mode = zoneVerificationMode
                         )
 
+                        if (!zoneResult.isConclusive) {
+                            _currentState.value = AutomationState.ERROR_RECOVERY
+                            logger(
+                                "ZONE_UNCERTAIN",
+                                "${zoneResult.reason} — تم تجاهل الأتمتة بدون سحب أو فتح الطلب",
+                                card.priceEgp,
+                                card.distanceKm,
+                                parsed.confidence
+                            )
+                            return
+                        }
+
                         if (!zoneResult.isAllowed) {
-                            // OUT OF ZONE: Execute Swipe out of zone!
                             logger(
                                 "SWIPE_OUT_OF_ZONE",
                                 "الطلب خارج منطقة العمل (${zoneResult.reason})، جاري سحب البطاقة لإخفائها",
@@ -102,53 +145,75 @@ class InDriveStateMachine(
                             val endX = if (swipeDirection == SwipeDirection.SWIPE_LEFT) b.left + 50f else b.right - 50f
                             val midY = b.exactCenterY()
 
-                            lastSwipedCardBounds = card.bounds
+                            lastSwipedCardBounds = Rect(card.bounds)
                             gestureDispatcher(GestureAction.Swipe(startX, midY, endX, midY, 350))
-                            return // wait for next event
-                        } else {
-                            // INSIDE ZONE: Check pricing
-                            _currentState.value = AutomationState.CALCULATING_PRICE
-                            val distance = card.distanceKm ?: 5.0
-                            val calcResult = PricingEngine.calculateMinimumPrice(distance, bands)
-
-                            val passengerPrice = card.priceEgp ?: 0.0
-                            if (passengerPrice < calcResult.minimumPrice) {
-                                // Open order for negotiation!
-                                _currentState.value = AutomationState.OPENING_ORDER
-                                logger(
-                                    "OPEN_ORDER",
-                                    "الطلب داخل الـZone ولكن السعر ($passengerPrice) < الحد الأدنى (${calcResult.minimumPrice}). فتح الطلب للتفاوض",
-                                    passengerPrice,
-                                    distance,
-                                    parsed.confidence
-                                )
-                                gestureDispatcher(GestureAction.Tap(card.bounds.exactCenterX(), card.bounds.exactCenterY()))
-                                return
-                            } else {
-                                // Acceptable as is
-                                logger(
-                                    "PRICE_OK",
-                                    "الطلب مناسب سعرياً (${passengerPrice} >= ${calcResult.minimumPrice} ج.م)",
-                                    passengerPrice,
-                                    distance,
-                                    parsed.confidence
-                                )
-                                if (negotiationConfig.autoAccept) {
-                                    gestureDispatcher(GestureAction.Tap(card.bounds.exactCenterX(), card.bounds.exactCenterY()))
-                                }
-                                return
-                            }
+                            return
                         }
+
+                        _currentState.value = AutomationState.OPENING_ORDER
+                        logger(
+                            "OPEN_ORDER",
+                            "الطلب داخل الـZone؛ فتح التفاصيل للتحقق من السعر والمسافة قبل أي تفاوض",
+                            card.priceEgp,
+                            card.distanceKm,
+                            parsed.confidence
+                        )
+                        gestureDispatcher(GestureAction.Tap(card.bounds.exactCenterX(), card.bounds.exactCenterY()))
+                        return
                     }
                 }
             }
 
             InDriveParser.InDriveScreenType.ORDER_DETAILS -> {
                 val offer = parsed.activeOffer
-                val distance = offer?.tripDistanceKm ?: 5.0
-                val calc = PricingEngine.calculateMinimumPrice(distance, bands)
-                val passengerPrice = offer?.displayedPrice ?: 0.0
+                if (offer == null || offer.confidence < MIN_ACTION_CONFIDENCE) {
+                    _currentState.value = AutomationState.ERROR_RECOVERY
+                    logger(
+                        "INCOMPLETE_ORDER",
+                        "تعذر قراءة تفاصيل الطلب بدرجة ثقة كافية؛ لن يتم قبول أو تفاوض",
+                        offer?.displayedPrice,
+                        offer?.tripDistanceKm,
+                        offer?.confidence ?: parsed.confidence
+                    )
+                    return
+                }
 
+                val passengerPrice = offer.displayedPrice
+                if (passengerPrice == null || passengerPrice <= 0.0) {
+                    _currentState.value = AutomationState.ERROR_RECOVERY
+                    logger("MISSING_PRICE", "تعذر قراءة سعر العميل؛ لن يتم اتخاذ أي إجراء", null, null, offer.confidence)
+                    return
+                }
+
+                val distance: Double? = when (pricingDistanceMode) {
+                    PricingDistanceMode.TRIP_ONLY -> offer.tripDistanceKm
+                    PricingDistanceMode.PICKUP_PLUS_TRIP -> {
+                        val pickup = offer.pickupDistanceKm
+                        val trip = offer.tripDistanceKm
+                        if (pickup != null && trip != null) pickup + trip else null
+                    }
+                }
+
+                if (distance == null || distance <= 0.0) {
+                    _currentState.value = AutomationState.ERROR_RECOVERY
+                    logger(
+                        "MISSING_DISTANCE",
+                        "المسافة المطلوبة لوضع التسعير الحالي غير مكتملة؛ لن يتم استخدام قيمة افتراضية ولن يتم التفاوض",
+                        passengerPrice,
+                        distance,
+                        offer.confidence
+                    )
+                    return
+                }
+
+                val calc = PricingEngine.calculateMinimumPrice(distance, bands)
+                if (!calc.isValid) {
+                    _currentState.value = AutomationState.ERROR_RECOVERY
+                    logger("INVALID_PRICING_RULES", calc.explanation, passengerPrice, distance, offer.confidence)
+                    return
+                }
+
+                _currentState.value = AutomationState.CALCULATING_PRICE
                 val decision = NegotiationEngine.evaluatePriceAndNegotiate(
                     passengerPrice = passengerPrice,
                     floorMinimum = calc.minimumPrice,
@@ -157,32 +222,42 @@ class InDriveStateMachine(
                 )
 
                 if (decision.isAcceptableAsIs) {
-                    logger("ORDER_ACCEPTABLE", decision.reason, passengerPrice, distance, parsed.confidence)
-                    if (negotiationConfig.autoAccept && parsed.acceptButtonBounds != null) {
+                    pendingCounterPrice = null
+                    logger("ORDER_ACCEPTABLE", decision.reason, passengerPrice, distance, offer.confidence)
+                    if (negotiationConfig.autoAccept) {
                         val b = parsed.acceptButtonBounds
-                        gestureDispatcher(GestureAction.Tap(b.exactCenterX(), b.exactCenterY()))
+                        if (b != null) {
+                            gestureDispatcher(GestureAction.Tap(b.exactCenterX(), b.exactCenterY()))
+                        } else {
+                            _currentState.value = AutomationState.ERROR_RECOVERY
+                            logger("ACCEPT_BUTTON_NOT_FOUND", "السعر مناسب لكن زر القبول غير مؤكد؛ لم يتم الضغط", passengerPrice, distance, offer.confidence)
+                        }
                     }
                 } else if (decision.shouldCounterOffer && decision.counterPrice != null) {
                     _currentState.value = AutomationState.NEGOTIATING
                     currentAttemptCount++
 
-                    // Check if one of the quick chips matches the counter price
                     val matchingChip = parsed.quickOfferButtons.entries.firstOrNull {
                         it.key >= decision.counterPrice && it.key <= decision.counterPrice + 2.0
                     }
 
                     if (matchingChip != null) {
-                        logger("SUBMIT_QUICK_OFFER", "تقديم عرض سريع بمبلغ ${matchingChip.key} ج.م", passengerPrice, distance, parsed.confidence)
+                        pendingCounterPrice = null
+                        logger("SUBMIT_QUICK_OFFER", "تقديم عرض سريع بمبلغ ${matchingChip.key} ج.م", passengerPrice, distance, offer.confidence)
                         gestureDispatcher(GestureAction.Tap(matchingChip.value.exactCenterX(), matchingChip.value.exactCenterY()))
                     } else if (parsed.customOfferEditButtonBounds != null) {
-                        logger("OPEN_CUSTOM_OFFER", "الضغط على زر القلم لتقديم عرض مخصص ${decision.counterPrice} ج.م", passengerPrice, distance, parsed.confidence)
+                        pendingCounterPrice = decision.counterPrice
+                        logger("OPEN_CUSTOM_OFFER", "فتح إدخال عرض مخصص بقيمة ${decision.counterPrice} ج.م", passengerPrice, distance, offer.confidence)
                         val b = parsed.customOfferEditButtonBounds
                         gestureDispatcher(GestureAction.Tap(b.exactCenterX(), b.exactCenterY()))
+                    } else {
+                        _currentState.value = AutomationState.ERROR_RECOVERY
+                        logger("COUNTER_CONTROL_NOT_FOUND", "لم يتم العثور بثقة على عرض سريع أو زر إدخال سعر مخصص؛ لم يتم الضغط", passengerPrice, distance, offer.confidence)
                     }
                 } else {
-                    // Cannot negotiate further, return to requests list safely
+                    pendingCounterPrice = null
                     _currentState.value = AutomationState.RETURN_TO_REQUESTS
-                    logger("CANCEL_ORDER", "تعذر التفاوض أو تم بلوغ الحد الأقصى. الرجوع لقائمة الطلبات", passengerPrice, distance, parsed.confidence)
+                    logger("CANCEL_ORDER", "تعذر التفاوض أو تم بلوغ الحد الأقصى. الرجوع لقائمة الطلبات", passengerPrice, distance, offer.confidence)
                     if (parsed.closeButtonBounds != null) {
                         gestureDispatcher(GestureAction.Tap(parsed.closeButtonBounds.exactCenterX(), parsed.closeButtonBounds.exactCenterY()))
                     } else {
@@ -192,12 +267,34 @@ class InDriveStateMachine(
             }
 
             InDriveParser.InDriveScreenType.COUNTER_OFFER_INPUT -> {
-                // If custom offer dialog is open, submit offer if button visible
-                if (parsed.submitOfferButtonBounds != null) {
-                    val b = parsed.submitOfferButtonBounds
-                    logger("SUBMIT_COUNTER_OFFER", "الضغط على زر 'تقديم عرض'", null, null, parsed.confidence)
-                    gestureDispatcher(GestureAction.Tap(b.exactCenterX(), b.exactCenterY()))
+                val target = pendingCounterPrice
+                val inputNode = parsed.customOfferInputNode
+                val submitBounds = parsed.submitOfferButtonBounds
+
+                if (target == null || inputNode == null || submitBounds == null) {
+                    _currentState.value = AutomationState.ERROR_RECOVERY
+                    logger(
+                        "CUSTOM_OFFER_NOT_READY",
+                        "نافذة العرض المخصص غير مكتملة؛ لن يتم إرسال سعر قبل التأكد من حقل الإدخال وزر التقديم",
+                        target,
+                        null,
+                        parsed.confidence
+                    )
+                    return
                 }
+
+                val textValue = if (target % 1.0 == 0.0) target.toInt().toString() else target.toString()
+                val textSet = gestureDispatcher(GestureAction.SetText(inputNode, textValue))
+                if (!textSet) {
+                    _currentState.value = AutomationState.ERROR_RECOVERY
+                    logger("SET_COUNTER_TEXT_FAILED", "فشل إدخال سعر العرض المخصص؛ لم يتم الضغط على تقديم عرض", target, null, parsed.confidence)
+                    return
+                }
+
+                delay(200)
+                logger("SUBMIT_COUNTER_OFFER", "تم إدخال $textValue ج.م بنجاح، جاري الضغط على 'تقديم عرض'", target, null, parsed.confidence)
+                val submitted = gestureDispatcher(GestureAction.Tap(submitBounds.exactCenterX(), submitBounds.exactCenterY()))
+                if (submitted) pendingCounterPrice = null
             }
 
             InDriveParser.InDriveScreenType.WAITING_RESPONSE -> {
@@ -205,6 +302,7 @@ class InDriveStateMachine(
                 if (parsed.isResponseRejected) {
                     logger("RESPONSE_REJECTED", "تم رفض العرض من العميل أو انتهت الصلاحية", null, null, parsed.confidence)
                     if (currentAttemptCount >= negotiationConfig.maxNegotiationAttempts) {
+                        pendingCounterPrice = null
                         // Return to requests
                         if (parsed.closeButtonBounds != null) {
                             gestureDispatcher(GestureAction.Tap(parsed.closeButtonBounds.exactCenterX(), parsed.closeButtonBounds.exactCenterY()))
