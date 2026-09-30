@@ -25,6 +25,7 @@ class InDriveStateMachine(
 
     companion object {
         private const val MIN_ACTION_CONFIDENCE = 80
+        private const val OFFLINE_CONFIRMATION_GRACE_MS = 15_000L
     }
 
     sealed class GestureAction {
@@ -41,6 +42,7 @@ class InDriveStateMachine(
     private var lastSwipedCardBounds: Rect? = null
     private var consecutiveErrors = 0
     private var pendingCounterPrice: Double? = null
+    private var lastConfirmedOfflineAt: Long = 0L
 
     fun reset() {
         _currentState.value = AutomationState.IDLE
@@ -48,6 +50,7 @@ class InDriveStateMachine(
         lastSwipedCardBounds = null
         consecutiveErrors = 0
         pendingCounterPrice = null
+        lastConfirmedOfflineAt = 0L
     }
 
     suspend fun processScreen(
@@ -79,29 +82,39 @@ class InDriveStateMachine(
             return
         }
 
-        if (parsed.offlineButtonBounds == null) {
-            _currentState.value = AutomationState.ERROR_RECOVERY
-            logger(
-                "STATUS_UNKNOWN",
-                "تعذر التأكد من حالة الاتصال في inDrive؛ لن يتم تنفيذ أي حركة",
-                null,
-                null,
-                parsed.confidence
-            )
-            return
+        val now = System.currentTimeMillis()
+
+        // If the connection control is visible, it is authoritative.
+        if (parsed.offlineButtonBounds != null) {
+            if (!parsed.isOffline) {
+                _currentState.value = AutomationState.ENSURE_OFFLINE
+                logger("ENSURE_OFFLINE", "تم رصد inDrive في وضع 'متصل'، جاري الضغط لإعادته 'غير متصل'", null, null, parsed.confidence)
+                val btn = parsed.offlineButtonBounds
+                gestureDispatcher(GestureAction.Tap(btn.exactCenterX(), btn.exactCenterY()))
+                return
+            }
+            lastConfirmedOfflineAt = now
         }
 
-        // Rule 1: Always enforce OFFLINE.
-        if (!parsed.isOffline) {
-            _currentState.value = AutomationState.ENSURE_OFFLINE
-            logger("ENSURE_OFFLINE", "تم رصد inDrive في وضع 'متصل'، جاري الضغط لإعادته 'غير متصل'", null, null, parsed.confidence)
-            val btn = parsed.offlineButtonBounds
-            gestureDispatcher(GestureAction.Tap(btn.exactCenterX(), btn.exactCenterY()))
-            return
-        }
+        // Detail / counter-offer screens sometimes hide the online/offline control from
+        // Accessibility. Allow them only when Offline was confirmed moments earlier.
+        val offlineRecentlyConfirmed = now - lastConfirmedOfflineAt <= OFFLINE_CONFIRMATION_GRACE_MS
 
         when (parsed.screenType) {
             InDriveParser.InDriveScreenType.REQUESTS_LIST -> {
+                if (parsed.offlineButtonBounds == null || !parsed.isOffline) {
+                    _currentState.value = AutomationState.ERROR_RECOVERY
+                    logger(
+                        "REQUESTS_STATUS_UNVERIFIED",
+                        "في صفحة الطلبات لازم أتأكد إن inDrive غير متصل قبل التحكم؛ لن يتم تنفيذ شيء الآن",
+                        null,
+                        null,
+                        parsed.confidence
+                    )
+                    return
+                }
+                lastConfirmedOfflineAt = now
+
                 _currentState.value = AutomationState.REQUESTS_PAGE
                 currentAttemptCount = 0
                 pendingCounterPrice = null
@@ -165,6 +178,18 @@ class InDriveStateMachine(
             }
 
             InDriveParser.InDriveScreenType.ORDER_DETAILS -> {
+                if (!offlineRecentlyConfirmed) {
+                    _currentState.value = AutomationState.ERROR_RECOVERY
+                    logger(
+                        "OFFLINE_NOT_RECENTLY_CONFIRMED",
+                        "شاشة تفاصيل الطلب لا تعرض حالة الاتصال، وآخر تأكيد Offline قديم؛ لن يتم التفاوض",
+                        parsed.activeOffer?.displayedPrice,
+                        parsed.activeOffer?.tripDistanceKm,
+                        parsed.confidence
+                    )
+                    return
+                }
+
                 val offer = parsed.activeOffer
                 if (offer == null || offer.confidence < MIN_ACTION_CONFIDENCE) {
                     _currentState.value = AutomationState.ERROR_RECOVERY
@@ -267,6 +292,12 @@ class InDriveStateMachine(
             }
 
             InDriveParser.InDriveScreenType.COUNTER_OFFER_INPUT -> {
+                if (!offlineRecentlyConfirmed) {
+                    _currentState.value = AutomationState.ERROR_RECOVERY
+                    logger("OFFLINE_NOT_RECENTLY_CONFIRMED", "لن يتم إرسال عرض بدون تأكيد Offline حديث", pendingCounterPrice, null, parsed.confidence)
+                    return
+                }
+
                 val target = pendingCounterPrice
                 val inputNode = parsed.customOfferInputNode
                 val submitBounds = parsed.submitOfferButtonBounds
