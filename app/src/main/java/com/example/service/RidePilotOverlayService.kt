@@ -27,6 +27,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
@@ -171,7 +172,7 @@ class RidePilotOverlayService : Service() {
         }
 
         val pause = Button(this).apply {
-            text = "إيقاف"
+            text = "إيقاف مؤقت"
             textSize = 10f
             setTextColor(0xFFFFFFFF.toInt())
             setBackgroundColor(0xFF2A2E36.toInt())
@@ -183,7 +184,7 @@ class RidePilotOverlayService : Service() {
         }
 
         val stop = Button(this).apply {
-            text = "STOP"
+            text = "STOP نهائي"
             textSize = 10f
             setTextColor(0xFFFFFFFF.toInt())
             setBackgroundColor(0xFFB3261E.toInt())
@@ -244,30 +245,63 @@ class RidePilotOverlayService : Service() {
 
         pause.setOnClickListener {
             serviceScope.launch {
-                RidePilotApplication.instance.settingsRepository.setAutomationEnabled(false)
-                status.text = "الأتمتة متوقفة"
+                val settings = RidePilotApplication.instance.settingsRepository
+                val hardStopped = settings.emergencyStop.first()
+                if (hardStopped) return@launch
+
+                val isRunning = settings.automationEnabled.first()
+                if (isRunning) {
+                    settings.pauseAutomation()
+                } else {
+                    settings.resumeAutomationFromOverlay()
+                }
             }
         }
 
         stop.setOnClickListener {
             serviceScope.launch {
-                RidePilotApplication.instance.settingsRepository.setEmergencyStop(true)
+                // HARD STOP cannot be cleared from the floating overlay.
+                RidePilotApplication.instance.settingsRepository.hardStop()
                 stopSelf()
             }
         }
-
         overlayRoot = root
         windowManager?.addView(root, layoutParams)
 
         serviceScope.launch {
-            combine(
+            val rideStateFlow = combine(
                 RidePilotAccessibilityService.activeTarget,
                 RidePilotAccessibilityService.latestUberAnalysis,
                 RidePilotAccessibilityService.latestInDriveParsed,
                 RidePilotAccessibilityService.automationStatus
             ) { target, uber, inDrive, message ->
                 OverlayState(target, uber, inDrive, message)
-            }.collect { state ->
+            }
+
+            combine(
+                rideStateFlow,
+                RidePilotApplication.instance.settingsRepository.automationEnabled,
+                RidePilotApplication.instance.settingsRepository.emergencyStop
+            ) { rideState, automationEnabled, hardStopped ->
+                RuntimeOverlayState(rideState, automationEnabled, hardStopped)
+            }.collect { runtime ->
+                if (runtime.hardStopped) {
+                    stopSelf()
+                    return@collect
+                }
+
+                pause.isEnabled = true
+                pause.text = if (runtime.automationEnabled) "إيقاف مؤقت" else "استئناف"
+
+                if (!runtime.automationEnabled) {
+                    bubble.text = "Ⅱ"
+                    bubble.background = bubbleDrawable(0xFFF0A94B.toInt())
+                    title.text = "RidePilot • متوقف مؤقتًا"
+                    status.text = "لا يتم تحليل أو تنفيذ أي طلبات\nاضغط استئناف للمتابعة"
+                    return@collect
+                }
+
+                val state = runtime.ride
                 when (state.target) {
                     AppTarget.UBER -> {
                         val good = state.uber?.let { it.isPriceViable && it.isInsideZone }
@@ -300,13 +334,11 @@ class RidePilotOverlayService : Service() {
                         bubble.text = "R"
                         bubble.background = bubbleDrawable(0xFF3978D9.toInt())
                         title.text = "RidePilot"
-                        status.text = "جاهز"
+                        status.text = state.message.ifBlank { "جاهز" }
                     }
                 }
             }
         }
-    }
-
     private fun bubbleDrawable(color: Int): GradientDrawable =
         GradientDrawable().apply {
             shape = GradientDrawable.OVAL
@@ -327,5 +359,11 @@ class RidePilotOverlayService : Service() {
         val uber: com.example.data.model.RideAnalysis?,
         val inDrive: com.example.domain.parser.InDriveParser.InDriveParsedScreen?,
         val message: String
+    )
+
+    private data class RuntimeOverlayState(
+        val ride: OverlayState,
+        val automationEnabled: Boolean,
+        val hardStopped: Boolean
     )
 }
