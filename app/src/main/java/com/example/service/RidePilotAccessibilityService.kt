@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.suspendCancellableCoroutine
 
 class RidePilotAccessibilityService : AccessibilityService() {
@@ -54,16 +55,21 @@ class RidePilotAccessibilityService : AccessibilityService() {
 
         private val _activeTarget = MutableStateFlow<AppTarget?>(null)
         val activeTarget: StateFlow<AppTarget?> = _activeTarget.asStateFlow()
+
+        private val _automationStatus = MutableStateFlow("جاهز")
+        val automationStatus: StateFlow<String> = _automationStatus.asStateFlow()
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val lastEventByPackage = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    private val debounceMs = 100L
+    private val debounceMs = 80L
+    private val processing = AtomicBoolean(false)
 
     private val stateMachine by lazy {
         InDriveStateMachine(
             gestureDispatcher = { action -> executeGesture(action) },
             logger = { action, reason, price, dist, conf ->
+                _automationStatus.value = reason
                 val app = RidePilotApplication.instance
                 app.logRepository.log(
                     AppLogEntry(
@@ -105,192 +111,169 @@ class RidePilotAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         val packageName = event.packageName?.toString() ?: return
+        if (packageName != UBER_DRIVER_PACKAGE && packageName != INDRIVE_PACKAGE) return
 
         val now = System.currentTimeMillis()
         val last = lastEventByPackage[packageName] ?: 0L
         if (now - last < debounceMs) return
         lastEventByPackage[packageName] = now
 
+        // One decision pipeline at a time. Rapid Accessibility events are common while
+        // cards animate, and overlapping pipelines caused duplicate or delayed actions.
+        if (!processing.compareAndSet(false, true)) return
+
         serviceScope.launch {
             try {
-                handlePackageEvent(packageName)
+                handleRelevantWindows()
             } catch (e: Exception) {
-                Log.e(TAG, "Error handling accessibility event", e)
+                Log.e(TAG, "Error handling ride windows", e)
+                _automationStatus.value = "خطأ في القراءة"
+            } finally {
+                processing.set(false)
             }
         }
     }
 
-    private suspend fun handlePackageEvent(packageName: String) {
+    private suspend fun handleRelevantWindows() {
         val app = RidePilotApplication.instance
-        val rootNode = findRootForPackage(packageName) ?: return
 
-        // 1. Detect Uber
-        if (packageName == UBER_DRIVER_PACKAGE) {
-            _activeTarget.value = AppTarget.UBER
-            val nodes = UberParser.extractNodes(rootNode)
+        // Uber cards can appear as a floating window over inDrive. Always inspect Uber
+        // first; while an Uber offer is visible we only analyse it and avoid tapping the
+        // inDrive window underneath.
+        val uberRoot = findRootForPackage(UBER_DRIVER_PACKAGE)
+        if (uberRoot != null) {
+            val nodes = UberParser.extractNodes(uberRoot)
             val offer = UberParser.parseUberScreen(nodes)
-
             if (offer != null) {
-                _liveCalibrationOffer.value = offer
-                val bands = app.pricingRepository.getBandsDirect(AppTarget.UBER)
-                val zones = app.zoneRepository.getEnabledZones()
-                val distMode = app.settingsRepository.pricingDistanceMode.first()
-                val zoneMode = app.settingsRepository.zoneVerificationMode.first()
-
-                // Calculate only from values actually read from the Uber card.
-                val pricingDistance: Double? = when (distMode) {
-                    PricingDistanceMode.TRIP_ONLY -> offer.tripDistanceKm
-                    PricingDistanceMode.PICKUP_PLUS_TRIP -> {
-                        val pickup = offer.pickupDistanceKm
-                        val trip = offer.tripDistanceKm
-                        if (pickup != null && trip != null) pickup + trip else null
-                    }
-                }
-
-                val displayedPrice = offer.displayedPrice
-                if (pricingDistance == null || pricingDistance <= 0.0 || displayedPrice == null || displayedPrice <= 0.0) {
-                    _latestUberAnalysis.value = null
-                    app.logRepository.log(
-                        AppLogEntry(
-                            app = AppTarget.UBER,
-                            screen = "OfferOverlay",
-                            detectedPrice = displayedPrice,
-                            detectedDistance = pricingDistance,
-                            zoneResult = "Unknown",
-                            minCalculated = null,
-                            action = "SKIP_INCOMPLETE_DATA",
-                            reason = "تعذر قراءة السعر أو المسافة المطلوبة؛ لم يتم استخدام أي قيمة افتراضية",
-                            confidence = offer.confidence
-                        )
-                    )
-                    return
-                }
-
-                val calc = PricingEngine.calculateMinimumPrice(pricingDistance, bands)
-                if (!calc.isValid) {
-                    _latestUberAnalysis.value = null
-                    app.logRepository.log(
-                        AppLogEntry(
-                            app = AppTarget.UBER,
-                            screen = "OfferOverlay",
-                            detectedPrice = displayedPrice,
-                            detectedDistance = pricingDistance,
-                            zoneResult = "Unknown",
-                            minCalculated = null,
-                            action = "SKIP_INVALID_PRICING",
-                            reason = calc.explanation,
-                            confidence = offer.confidence
-                        )
-                    )
-                    return
-                }
-
-                val zoneRes = ZoneEngine.evaluateOffer(
-                    context = applicationContext,
-                    pickupAddress = offer.pickupAddress,
-                    destinationAddress = offer.destinationAddress,
-                    zones = zones,
-                    mode = zoneMode
-                )
-
-                if (!zoneRes.isConclusive) {
-                    _latestUberAnalysis.value = null
-                    app.logRepository.log(
-                        AppLogEntry(
-                            app = AppTarget.UBER,
-                            screen = "OfferOverlay",
-                            detectedPrice = displayedPrice,
-                            detectedDistance = pricingDistance,
-                            zoneResult = zoneRes.reason,
-                            minCalculated = calc.minimumPrice,
-                            action = "SKIP_ZONE_UNCERTAIN",
-                            reason = zoneRes.reason,
-                            confidence = offer.confidence
-                        )
-                    )
-                    return
-                }
-
-                val isPriceViable = displayedPrice >= calc.minimumPrice
-
-                val analysis = RideAnalysis(
-                    offer = offer,
-                    totalPricingDistanceKm = pricingDistance,
-                    applicableBand = calc.matchedBand,
-                    minRequiredPrice = calc.minimumPrice,
-                    pricePerKm = if (pricingDistance > 0) PricingEngine.roundToTwoDecimals(displayedPrice / pricingDistance) else 0.0,
-                    isPriceViable = isPriceViable,
-                    isInsideZone = zoneRes.isAllowed,
-                    zoneStatusReason = zoneRes.reason,
-                    pricingReason = calc.explanation,
-                    actionRecommended = if (isPriceViable && zoneRes.isAllowed) "✅ مناسب" else "❌ غير مناسب"
-                )
-
-                _latestUberAnalysis.value = analysis
-
-                // Log analysis
-                app.logRepository.log(
-                    AppLogEntry(
-                        app = AppTarget.UBER,
-                        screen = "OfferOverlay",
-                        detectedPrice = displayedPrice,
-                        detectedDistance = pricingDistance,
-                        zoneResult = zoneRes.reason,
-                        minCalculated = calc.minimumPrice,
-                        action = "DISPLAY_OVERLAY",
-                        reason = if (isPriceViable && zoneRes.isAllowed) "مناسب للعمل" else "أقل من الحد أو خارج الزون",
-                        confidence = offer.confidence
-                    )
-                )
-
-                // Ensure floating overlay service is running
-                val overlayIntent = Intent(applicationContext, RidePilotOverlayService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    startForegroundService(overlayIntent)
-                } else {
-                    startService(overlayIntent)
-                }
+                _activeTarget.value = AppTarget.UBER
+                processUberOffer(app, offer)
+                ensureOverlayRunning()
+                return
             }
         }
 
-        // 2. Detect inDrive
-        else if (packageName == INDRIVE_PACKAGE) {
-            _activeTarget.value = AppTarget.INDRIVE
-            val parsedScreen = InDriveParser.parseScreen(rootNode)
-            _latestInDriveParsed.value = parsedScreen
-            if (parsedScreen.activeOffer != null) {
-                _liveCalibrationOffer.value = parsedScreen.activeOffer
+        val inDriveRoot = findRootForPackage(INDRIVE_PACKAGE) ?: return
+        _activeTarget.value = AppTarget.INDRIVE
+
+        val parsedScreen = InDriveParser.parseScreen(inDriveRoot)
+        _latestInDriveParsed.value = parsedScreen
+        if (parsedScreen.activeOffer != null) {
+            _liveCalibrationOffer.value = parsedScreen.activeOffer
+        }
+
+        val automationEnabled = app.settingsRepository.automationEnabled.first()
+        val emergencyStop = app.settingsRepository.emergencyStop.first()
+        val swipeDir = app.settingsRepository.swipeDirection.first()
+        val distMode = app.settingsRepository.pricingDistanceMode.first()
+        val zoneMode = app.settingsRepository.zoneVerificationMode.first()
+        val bands = app.pricingRepository.getBandsDirect(AppTarget.INDRIVE)
+        val zones = app.zoneRepository.getEnabledZones()
+        val negConfig = app.settingsRepository.negotiationConfig.first()
+
+        stateMachine.processScreen(
+            parsed = parsedScreen,
+            automationEnabled = automationEnabled,
+            emergencyStop = emergencyStop,
+            swipeDirection = swipeDir,
+            pricingDistanceMode = distMode,
+            zoneVerificationMode = zoneMode,
+            bands = bands,
+            zones = zones,
+            negotiationConfig = negConfig,
+            context = applicationContext
+        )
+
+        ensureOverlayRunning()
+    }
+
+    private suspend fun processUberOffer(app: RidePilotApplication, offer: RideOffer) {
+        _liveCalibrationOffer.value = offer
+
+        val bands = app.pricingRepository.getBandsDirect(AppTarget.UBER)
+        val zones = app.zoneRepository.getEnabledZones()
+        val distMode = app.settingsRepository.pricingDistanceMode.first()
+        val zoneMode = app.settingsRepository.zoneVerificationMode.first()
+
+        val pricingDistance: Double? = when (distMode) {
+            PricingDistanceMode.TRIP_ONLY -> offer.tripDistanceKm
+            PricingDistanceMode.PICKUP_PLUS_TRIP -> {
+                val pickup = offer.pickupDistanceKm
+                val trip = offer.tripDistanceKm
+                if (pickup != null && trip != null) pickup + trip else null
             }
+        }
 
-            val automationEnabled = app.settingsRepository.automationEnabled.first()
-            val emergencyStop = app.settingsRepository.emergencyStop.first()
-            val swipeDir = app.settingsRepository.swipeDirection.first()
-            val distMode = app.settingsRepository.pricingDistanceMode.first()
-            val zoneMode = app.settingsRepository.zoneVerificationMode.first()
-            val bands = app.pricingRepository.getBandsDirect(AppTarget.INDRIVE)
-            val zones = app.zoneRepository.getEnabledZones()
-            val negConfig = app.settingsRepository.negotiationConfig.first()
+        val displayedPrice = offer.displayedPrice
+        if (pricingDistance == null || pricingDistance <= 0.0 || displayedPrice == null || displayedPrice <= 0.0) {
+            _latestUberAnalysis.value = null
+            _automationStatus.value = "Uber: بيانات غير مكتملة"
+            return
+        }
 
-            stateMachine.processScreen(
-                parsed = parsedScreen,
-                automationEnabled = automationEnabled,
-                emergencyStop = emergencyStop,
-                swipeDirection = swipeDir,
-                pricingDistanceMode = distMode,
-                zoneVerificationMode = zoneMode,
-                bands = bands,
-                zones = zones,
-                negotiationConfig = negConfig,
-                context = applicationContext
+        val calc = PricingEngine.calculateMinimumPrice(pricingDistance, bands)
+        if (!calc.isValid) {
+            _latestUberAnalysis.value = null
+            _automationStatus.value = "Uber: راجع جدول التسعير"
+            return
+        }
+
+        val zoneRes = ZoneEngine.evaluateOffer(
+            context = applicationContext,
+            pickupAddress = offer.pickupAddress,
+            destinationAddress = offer.destinationAddress,
+            zones = zones,
+            mode = zoneMode
+        )
+
+        if (!zoneRes.isConclusive) {
+            _latestUberAnalysis.value = null
+            _automationStatus.value = "Uber: تعذر التحقق من المنطقة"
+            return
+        }
+
+        val isPriceViable = displayedPrice >= calc.minimumPrice
+        val analysis = RideAnalysis(
+            offer = offer,
+            totalPricingDistanceKm = pricingDistance,
+            applicableBand = calc.matchedBand,
+            minRequiredPrice = calc.minimumPrice,
+            pricePerKm = PricingEngine.roundToTwoDecimals(displayedPrice / pricingDistance),
+            isPriceViable = isPriceViable,
+            isInsideZone = zoneRes.isAllowed,
+            zoneStatusReason = zoneRes.reason,
+            pricingReason = calc.explanation,
+            actionRecommended = if (isPriceViable && zoneRes.isAllowed) "✅ مناسب" else "❌ غير مناسب"
+        )
+
+        _latestUberAnalysis.value = analysis
+        _automationStatus.value = if (isPriceViable && zoneRes.isAllowed) {
+            "Uber: مناسب"
+        } else {
+            "Uber: غير مناسب"
+        }
+
+        app.logRepository.log(
+            AppLogEntry(
+                app = AppTarget.UBER,
+                screen = "OfferOverlay",
+                detectedPrice = displayedPrice,
+                detectedDistance = pricingDistance,
+                zoneResult = zoneRes.reason,
+                minCalculated = calc.minimumPrice,
+                action = "DISPLAY_OVERLAY",
+                reason = _automationStatus.value,
+                confidence = offer.confidence
             )
+        )
+    }
 
-            // Start overlay if enabled
-            val overlayIntent = Intent(applicationContext, RidePilotOverlayService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(overlayIntent)
-            } else {
-                startService(overlayIntent)
-            }
+    private fun ensureOverlayRunning() {
+        if (RidePilotOverlayService.isOverlayRunning) return
+        val overlayIntent = Intent(applicationContext, RidePilotOverlayService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(overlayIntent)
+        } else {
+            startService(overlayIntent)
         }
     }
 
