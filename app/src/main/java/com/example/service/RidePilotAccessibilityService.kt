@@ -64,6 +64,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
     private val lastEventByPackage = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val debounceMs = 80L
     private val processing = AtomicBoolean(false)
+    private val pendingRecheck = AtomicBoolean(false)
 
     private val stateMachine by lazy {
         InDriveStateMachine(
@@ -118,18 +119,31 @@ class RidePilotAccessibilityService : AccessibilityService() {
         if (now - last < debounceMs) return
         lastEventByPackage[packageName] = now
 
-        // One decision pipeline at a time. Rapid Accessibility events are common while
-        // cards animate, and overlapping pipelines caused duplicate or delayed actions.
+        // Conflate rapid Accessibility events instead of dropping a screen transition.
+        // This is important when a tap opens the custom-offer editor immediately.
+        requestWindowProcessing()
+    }
+
+    private fun requestWindowProcessing() {
+        pendingRecheck.set(true)
         if (!processing.compareAndSet(false, true)) return
 
         serviceScope.launch {
             try {
-                handleRelevantWindows()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error handling ride windows", e)
-                _automationStatus.value = "خطأ في القراءة"
+                while (pendingRecheck.getAndSet(false)) {
+                    try {
+                        handleRelevantWindows()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error handling ride windows", e)
+                        _automationStatus.value = "خطأ في القراءة"
+                    }
+                }
             } finally {
                 processing.set(false)
+                // Close the tiny race where a new event arrives just before releasing.
+                if (pendingRecheck.get()) {
+                    requestWindowProcessing()
+                }
             }
         }
     }
