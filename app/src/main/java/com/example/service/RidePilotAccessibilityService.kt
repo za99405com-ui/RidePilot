@@ -56,8 +56,8 @@ class RidePilotAccessibilityService : AccessibilityService() {
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private var lastEventTime = 0L
-    private val debounceMs = 700L
+    private val lastEventByPackage = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val debounceMs = 100L
 
     private val stateMachine by lazy {
         InDriveStateMachine(
@@ -103,10 +103,9 @@ class RidePilotAccessibilityService : AccessibilityService() {
         val packageName = event.packageName?.toString() ?: return
 
         val now = System.currentTimeMillis()
-        if (now - lastEventTime < debounceMs) {
-            return
-        }
-        lastEventTime = now
+        val last = lastEventByPackage[packageName] ?: 0L
+        if (now - last < debounceMs) return
+        lastEventByPackage[packageName] = now
 
         serviceScope.launch {
             try {
@@ -344,6 +343,18 @@ class RidePilotAccessibilityService : AccessibilityService() {
                             cont.resume(false)
                         }
                     }, null)
+                }
+
+                is InDriveStateMachine.GestureAction.ClickNode -> {
+                    var current: AccessibilityNodeInfo? = action.node
+                    var clicked = false
+                    var hops = 0
+                    while (current != null && hops < 5 && !clicked) {
+                        clicked = current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        current = if (!clicked) current.parent else null
+                        hops++
+                    }
+                    cont.resume(clicked)
                 }
 
                 is InDriveStateMachine.GestureAction.SetText -> {
