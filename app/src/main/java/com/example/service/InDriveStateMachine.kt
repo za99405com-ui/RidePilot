@@ -134,14 +134,17 @@ class InDriveStateMachine(
                         )
 
                         if (!zoneResult.isConclusive) {
-                            _currentState.value = AutomationState.ERROR_RECOVERY
+                            // The compact request card may omit one of the addresses.
+                            // Open details to get a richer parse, but do not negotiate yet.
+                            _currentState.value = AutomationState.OPENING_ORDER
                             logger(
-                                "ZONE_UNCERTAIN",
-                                "${zoneResult.reason} — تم تجاهل الأتمتة بدون سحب أو فتح الطلب",
+                                "ZONE_NEEDS_DETAILS",
+                                "${zoneResult.reason} — فتح تفاصيل الطلب للتحقق من المنطقة قبل أي تفاوض",
                                 card.priceEgp,
                                 card.distanceKm,
                                 parsed.confidence
                             )
+                            gestureDispatcher(GestureAction.Tap(card.bounds.exactCenterX(), card.bounds.exactCenterY()))
                             return
                         }
 
@@ -203,6 +206,43 @@ class InDriveStateMachine(
                     return
                 }
 
+                val detailZone = ZoneEngine.evaluateOffer(
+                    context = context,
+                    pickupAddress = offer.pickupAddress,
+                    destinationAddress = offer.destinationAddress,
+                    zones = zones,
+                    mode = zoneVerificationMode
+                )
+
+                if (!detailZone.isConclusive) {
+                    _currentState.value = AutomationState.ERROR_RECOVERY
+                    logger(
+                        "ZONE_STILL_UNCERTAIN",
+                        "تعذر التحقق من منطقة الطلب حتى بعد فتح التفاصيل؛ لن يتم التفاوض",
+                        offer.displayedPrice,
+                        offer.tripDistanceKm,
+                        offer.confidence
+                    )
+                    return
+                }
+
+                if (!detailZone.isAllowed) {
+                    _currentState.value = AutomationState.RETURN_TO_REQUESTS
+                    logger(
+                        "DETAILS_OUT_OF_ZONE",
+                        "الطلب خارج منطقة العمل بعد التحقق من التفاصيل؛ الرجوع لقائمة الطلبات",
+                        offer.displayedPrice,
+                        offer.tripDistanceKm,
+                        offer.confidence
+                    )
+                    if (parsed.closeButtonBounds != null) {
+                        gestureDispatcher(GestureAction.Tap(parsed.closeButtonBounds.exactCenterX(), parsed.closeButtonBounds.exactCenterY()))
+                    } else {
+                        gestureDispatcher(GestureAction.Back)
+                    }
+                    return
+                }
+
                 val passengerPrice = offer.displayedPrice
                 if (passengerPrice == null || passengerPrice <= 0.0) {
                     _currentState.value = AutomationState.ERROR_RECOVERY
@@ -215,7 +255,20 @@ class InDriveStateMachine(
                     PricingDistanceMode.PICKUP_PLUS_TRIP -> {
                         val pickup = offer.pickupDistanceKm
                         val trip = offer.tripDistanceKm
-                        if (pickup != null && trip != null) pickup + trip else null
+                        when {
+                            pickup != null && trip != null -> pickup + trip
+                            trip != null -> {
+                                logger(
+                                    "TRIP_ONLY_DISTANCE_USED",
+                                    "inDrive لم يعرض مسافة الوصول في هذه الشاشة؛ سيتم التسعير على مسافة الرحلة المقروءة فقط",
+                                    passengerPrice,
+                                    trip,
+                                    offer.confidence
+                                )
+                                trip
+                            }
+                            else -> null
+                        }
                     }
                 }
 
