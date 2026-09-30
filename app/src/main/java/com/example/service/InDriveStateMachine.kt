@@ -192,12 +192,11 @@ class InDriveStateMachine(
                 if (!zone.isConclusive) {
                     logger(
                         "ZONE_UNKNOWN",
-                        "تعذر تحديد المنطقة؛ رجوع بدون تفاوض",
+                        "تعذر تحديد المنطقة مؤقتًا؛ إعادة المحاولة بدون إغلاق الطلب",
                         offer.displayedPrice,
                         offer.tripDistanceKm,
                         offer.confidence
                     )
-                    returnToRequests(parsed)
                     return
                 }
 
