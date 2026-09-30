@@ -334,13 +334,12 @@ object InDriveParser {
         } else null
 
         val actionBoundary = if (markerB >= 0) {
-            texts.indexOfFirst { idxText ->
-                texts.indexOf(idxText) > markerB && (
-                    idxText.contains("القبول مقابل") ||
-                    idxText.contains("اقترح أجرتك") ||
-                    idxText.contains("إغلاق")
-                )
-            }.takeIf { it > markerB } ?: texts.size
+            ((markerB + 1) until texts.size).firstOrNull { i ->
+                val t = texts[i]
+                t.contains("القبول مقابل") ||
+                    t.contains("اقترح أجرتك") ||
+                    t.contains("إغلاق")
+            } ?: texts.size
         } else texts.size
 
         val destinationFromMarkers = if (markerB >= 0) {
