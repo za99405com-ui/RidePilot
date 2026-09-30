@@ -47,6 +47,11 @@ class RidePilotOverlayService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Never let Android resurrect a controller that the user has fully stopped.
+        return START_NOT_STICKY
+    }
+
     override fun onCreate() {
         super.onCreate()
         isOverlayRunning = true
