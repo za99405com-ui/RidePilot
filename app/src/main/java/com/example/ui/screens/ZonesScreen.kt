@@ -333,6 +333,22 @@ fun ZonesScreen(navController: NavController) {
             return
         }
 
+        area.fixedPolygon?.let { fixed ->
+            val groups = listOf(
+                fixed.map { GeoPoint(it.latitude, it.longitude) }
+            )
+            selectedAreaIds.add(area.id)
+            selectedNames.add(area.name)
+            selectedAreaPolygons[area.id] = groups
+            rebuildPresetPreview()
+            updateAutoName()
+            mapMode = ZoneMapMode.BROWSE
+            mapMessage = "تم تطبيق «${area.name}» بالإحداثيات التي أرسلتها"
+            renderMap(mapViewInstance)
+            focusGroups(groups, 12.8)
+            return
+        }
+
         if (isRecognizing) return
 
         isRecognizing = true
