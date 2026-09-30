@@ -185,6 +185,15 @@ object InDriveParser {
 
         inspectNode(root)
 
+        // Detect request cards even when this inDrive build does not expose the
+        // "طلبات الركوب" heading through Accessibility. Previously this was
+        // circular: cards were parsed only after the screen had already been
+        // identified as REQUESTS_LIST.
+        extractOrderCardsFromList(root, orderCards)
+        if (orderCards.isNotEmpty()) {
+            isRequestsList = true
+        }
+
         // The pencil sits on the same horizontal row as the quick-price chips.
         // Pick the closest image button to that row instead of a random map/profile icon.
         if (editButtonBounds == null && quickOfferMap.isNotEmpty() && editIconCandidates.isNotEmpty()) {
@@ -213,11 +222,6 @@ object InDriveParser {
             isOrderDetails -> InDriveScreenType.ORDER_DETAILS
             isRequestsList -> InDriveScreenType.REQUESTS_LIST
             else -> InDriveScreenType.UNKNOWN
-        }
-
-        // Parse order cards if in requests list
-        if (screenType == InDriveScreenType.REQUESTS_LIST) {
-            extractOrderCardsFromList(root, orderCards)
         }
 
         // Parse active order if in order details
