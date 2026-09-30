@@ -50,6 +50,9 @@ class RidePilotAccessibilityService : AccessibilityService() {
 
         private val _liveCalibrationOffer = MutableStateFlow<RideOffer?>(null)
         val liveCalibrationOffer: StateFlow<RideOffer?> = _liveCalibrationOffer.asStateFlow()
+
+        private val _activeTarget = MutableStateFlow<AppTarget?>(null)
+        val activeTarget: StateFlow<AppTarget?> = _activeTarget.asStateFlow()
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -116,10 +119,11 @@ class RidePilotAccessibilityService : AccessibilityService() {
 
     private suspend fun handlePackageEvent(packageName: String) {
         val app = RidePilotApplication.instance
-        val rootNode = rootInActiveWindow ?: return
+        val rootNode = findRootForPackage(packageName) ?: return
 
         // 1. Detect Uber
         if (packageName == UBER_DRIVER_PACKAGE) {
+            _activeTarget.value = AppTarget.UBER
             val nodes = UberParser.extractNodes(rootNode)
             val offer = UberParser.parseUberScreen(nodes)
 
@@ -248,6 +252,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
 
         // 2. Detect inDrive
         else if (packageName == INDRIVE_PACKAGE) {
+            _activeTarget.value = AppTarget.INDRIVE
             val parsedScreen = InDriveParser.parseScreen(rootNode)
             _latestInDriveParsed.value = parsedScreen
             if (parsedScreen.activeOffer != null) {
@@ -284,6 +289,21 @@ class RidePilotAccessibilityService : AccessibilityService() {
                 startService(overlayIntent)
             }
         }
+    }
+
+    private fun findRootForPackage(packageName: String): AccessibilityNodeInfo? {
+        // Uber request cards may be shown in a separate overlay window while another app
+        // (for example inDrive or Maps) remains the active window. Search every
+        // interactive AccessibilityWindow before falling back to rootInActiveWindow.
+        val matchingWindowRoot = windows
+            .asSequence()
+            .mapNotNull { it.root }
+            .firstOrNull { it.packageName?.toString() == packageName }
+
+        if (matchingWindowRoot != null) return matchingWindowRoot
+
+        val activeRoot = rootInActiveWindow
+        return if (activeRoot?.packageName?.toString() == packageName) activeRoot else null
     }
 
     private suspend fun executeGesture(action: InDriveStateMachine.GestureAction): Boolean {
