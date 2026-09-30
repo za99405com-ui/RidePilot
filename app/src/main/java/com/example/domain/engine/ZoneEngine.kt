@@ -7,6 +7,8 @@ import com.example.data.model.LatLngPoint
 import com.example.data.model.WorkZone
 import com.example.data.model.ZoneVerificationMode
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.util.Locale
@@ -14,8 +16,10 @@ import java.util.concurrent.ConcurrentHashMap
 
 object ZoneEngine {
 
-    // In-memory cache for address string -> LatLng to minimize network/geocoder calls
-    private val addressCache = ConcurrentHashMap<String, LatLngPoint?>()
+    // ConcurrentHashMap does not allow null values. Keep successful and failed
+    // geocoding results separately so a failed lookup never crashes automation.
+    private val addressCache = ConcurrentHashMap<String, LatLngPoint>()
+    private val failedAddressCache = ConcurrentHashMap.newKeySet<String>()
 
     data class ZoneCheckResult(
         val isAllowed: Boolean,
@@ -88,23 +92,26 @@ object ZoneEngine {
         if (addressText.isNullOrBlank()) return null
         val cleanKey = addressText.trim().replace("\\s+".toRegex(), " ")
 
-        if (addressCache.containsKey(cleanKey)) {
-            return addressCache[cleanKey]
-        }
+        addressCache[cleanKey]?.let { return it }
+        if (failedAddressCache.contains(cleanKey)) return null
 
         return withContext(Dispatchers.IO) {
             try {
                 val geocoder = Geocoder(context, Locale("ar", "EG"))
                 @Suppress("DEPRECATION")
                 val addresses = geocoder.getFromLocationName(cleanKey, 1) ?: emptyList()
-                val result = if (addresses.isNotEmpty()) {
-                    LatLngPoint(addresses[0].latitude, addresses[0].longitude)
-                } else null
+                val result = addresses.firstOrNull()?.let {
+                    LatLngPoint(it.latitude, it.longitude)
+                }
 
-                addressCache[cleanKey] = result
+                if (result != null) {
+                    addressCache[cleanKey] = result
+                } else {
+                    failedAddressCache.add(cleanKey)
+                }
                 result
-            } catch (e: Exception) {
-                addressCache[cleanKey] = null
+            } catch (_: Exception) {
+                failedAddressCache.add(cleanKey)
                 null
             }
         }
@@ -154,8 +161,13 @@ object ZoneEngine {
             }
         }
 
-        val pickupPoint = geocodeAddress(context, pickupAddress)
-        val destPoint = geocodeAddress(context, destinationAddress)
+        // Resolve pickup and destination in parallel; sequential geocoding doubled
+        // the response time on first-seen addresses.
+        val (pickupPoint, destPoint) = coroutineScope {
+            val pickupDeferred = async { geocodeAddress(context, pickupAddress) }
+            val destinationDeferred = async { geocodeAddress(context, destinationAddress) }
+            pickupDeferred.await() to destinationDeferred.await()
+        }
 
         // A failed geocode must not be treated as "outside the zone".
         // Keyword fallback is considered authoritative only when every active zone
