@@ -166,9 +166,11 @@ class RidePilotAccessibilityService : AccessibilityService() {
         val overlayEnabled = app.settingsRepository.overlayEnabled.first()
 
         if (emergencyStop || !overlayEnabled) {
+            stateMachine.reset()
             _activeTarget.value = null
             _latestUberAnalysis.value = null
             _latestInDriveParsed.value = null
+            _liveCalibrationOffer.value = null
             _automationStatus.value = "STOP — التشغيل من تطبيق RidePilot فقط"
             if (RidePilotOverlayService.isOverlayRunning) {
                 stopService(Intent(applicationContext, RidePilotOverlayService::class.java))
@@ -179,8 +181,11 @@ class RidePilotAccessibilityService : AccessibilityService() {
         // Temporary pause keeps the floating control available for Resume, but
         // performs no ride analysis and dispatches no gesture.
         if (!automationEnabled) {
+            stateMachine.reset()
             _activeTarget.value = null
             _latestUberAnalysis.value = null
+            _latestInDriveParsed.value = null
+            _liveCalibrationOffer.value = null
             _automationStatus.value = "متوقف مؤقتًا"
             ensureOverlayRunning()
             return
@@ -399,8 +404,14 @@ class RidePilotAccessibilityService : AccessibilityService() {
         }
     }
 
-    private suspend fun executeGesture(action: InDriveStateMachine.GestureAction): Boolean =
-        withContext(Dispatchers.Main.immediate) {
+    private suspend fun executeGesture(action: InDriveStateMachine.GestureAction): Boolean {
+        // Final safety gate immediately before every automated action.
+        val settings = RidePilotApplication.instance.settingsRepository
+        if (settings.emergencyStop.first() || !settings.automationEnabled.first()) {
+            return false
+        }
+
+        return withContext(Dispatchers.Main.immediate) {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
                 return@withContext false
             }
@@ -473,5 +484,6 @@ class RidePilotAccessibilityService : AccessibilityService() {
                 }
             }
         }
+    }
 
 }
