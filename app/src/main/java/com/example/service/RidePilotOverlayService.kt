@@ -123,13 +123,13 @@ class RidePilotOverlayService : Service() {
         val bubble = TextView(this).apply {
             text = "R"
             gravity = Gravity.CENTER
-            textSize = 16f
+            textSize = 12f
             setTextColor(0xFFFFFFFF.toInt())
             setTypeface(null, android.graphics.Typeface.BOLD)
             background = bubbleDrawable(0xFF3978D9.toInt())
             layoutParams = LinearLayout.LayoutParams(
-                (48 * density).toInt(),
-                (48 * density).toInt()
+                (38 * density).toInt(),
+                (38 * density).toInt()
             )
         }
 
@@ -144,7 +144,7 @@ class RidePilotOverlayService : Service() {
             )
             background = roundedRect(0xF20B0D12.toInt(), 16f * density)
             layoutParams = LinearLayout.LayoutParams(
-                (225 * density).toInt(),
+                (210 * density).toInt(),
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
                 topMargin = (6 * density).toInt()
