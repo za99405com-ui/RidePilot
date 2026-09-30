@@ -159,9 +159,13 @@ class RidePilotAccessibilityService : AccessibilityService() {
         // Uber cards can appear as a floating window over inDrive. Always inspect Uber
         // first; while an Uber offer is visible we only analyse it and avoid tapping the
         // inDrive window underneath.
-        val uberRoot = findRootForPackage(UBER_DRIVER_PACKAGE)
-        if (uberRoot != null) {
+        val uberRoots = findRootsForPackage(UBER_DRIVER_PACKAGE)
+        var sawUberContent = false
+
+        for (uberRoot in uberRoots) {
             val nodes = UberParser.extractNodes(uberRoot)
+            if (nodes.isNotEmpty()) sawUberContent = true
+
             val offer = UberParser.parseUberScreen(nodes)
             if (offer != null) {
                 _activeTarget.value = AppTarget.UBER
@@ -169,16 +173,16 @@ class RidePilotAccessibilityService : AccessibilityService() {
                 ensureOverlayRunning()
                 return
             }
+        }
 
-            // If an Uber window is already above inDrive but its text is still
-            // animating/loading, never fall through and tap inDrive underneath it.
-            if (nodes.isNotEmpty()) {
-                _activeTarget.value = AppTarget.UBER
-                _latestUberAnalysis.value = null
-                _automationStatus.value = "Uber: جاري قراءة الطلب"
-                ensureOverlayRunning()
-                return
-            }
+        // If any Uber window is already above inDrive but its text is still
+        // animating/loading, never fall through and tap inDrive underneath it.
+        if (sawUberContent) {
+            _activeTarget.value = AppTarget.UBER
+            _latestUberAnalysis.value = null
+            _automationStatus.value = "Uber: جاري قراءة الطلب"
+            ensureOverlayRunning()
+            return
         }
 
         val inDriveRoot = findRootForPackage(INDRIVE_PACKAGE) ?: return
@@ -306,20 +310,26 @@ class RidePilotAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun findRootForPackage(packageName: String): AccessibilityNodeInfo? {
-        // Uber request cards may be shown in a separate overlay window while another app
-        // (for example inDrive or Maps) remains the active window. Search every
-        // interactive AccessibilityWindow before falling back to rootInActiveWindow.
-        val matchingWindowRoot = windows
+    private fun findRootsForPackage(packageName: String): List<AccessibilityNodeInfo> {
+        val matching = windows
             .asSequence()
             .mapNotNull { it.root }
-            .firstOrNull { it.packageName?.toString() == packageName }
-
-        if (matchingWindowRoot != null) return matchingWindowRoot
+            .filter { it.packageName?.toString() == packageName }
+            .toMutableList()
 
         val activeRoot = rootInActiveWindow
-        return if (activeRoot?.packageName?.toString() == packageName) activeRoot else null
+        if (
+            activeRoot?.packageName?.toString() == packageName &&
+            matching.none { it === activeRoot }
+        ) {
+            matching.add(activeRoot)
+        }
+
+        return matching
     }
+
+    private fun findRootForPackage(packageName: String): AccessibilityNodeInfo? =
+        findRootsForPackage(packageName).firstOrNull()
 
     private fun schedulePostGestureRechecks() {
         val token = postGestureRecheckToken.incrementAndGet()
@@ -348,7 +358,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
                 when (action) {
                     is InDriveStateMachine.GestureAction.Tap -> {
                         val path = Path().apply { moveTo(action.x, action.y) }
-                        val stroke = GestureDescription.StrokeDescription(path, 0, 80)
+                        val stroke = GestureDescription.StrokeDescription(path, 0, 55)
                         val gesture = GestureDescription.Builder().addStroke(stroke).build()
                         dispatchGesture(gesture, object : GestureResultCallback() {
                             override fun onCompleted(gestureDescription: GestureDescription?) {
