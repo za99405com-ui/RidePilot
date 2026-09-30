@@ -26,6 +26,7 @@ class InDriveStateMachine(
 
     companion object {
         private const val MIN_ACTION_CONFIDENCE = 80
+        private const val REPEAT_ACTION_GUARD_MS = 1_200L
     }
 
     sealed class GestureAction {
@@ -51,6 +52,8 @@ class InDriveStateMachine(
     private var pendingSwipeAfterReturn = false
     private var lastOrderKey: String? = null
     private var lastOpenedAt = 0L
+    private var lastActionSignature: String? = null
+    private var lastActionAt = 0L
 
     fun reset() {
         _currentState.value = AutomationState.IDLE
@@ -60,6 +63,8 @@ class InDriveStateMachine(
         pendingSwipeAfterReturn = false
         lastOrderKey = null
         lastOpenedAt = 0L
+        lastActionSignature = null
+        lastActionAt = 0L
     }
 
     suspend fun processScreen(
@@ -93,6 +98,7 @@ class InDriveStateMachine(
 
         if (parsed.offlineButtonBounds != null && !parsed.isOffline) {
             _currentState.value = AutomationState.ENSURE_OFFLINE
+            if (!canDispatch("ENSURE_OFFLINE", 1_500L)) return
             logger("ENSURE_OFFLINE", "إرجاع inDrive إلى وضع غير متصل", null, null, parsed.confidence)
             val b = parsed.offlineButtonBounds
             gestureDispatcher(GestureAction.Tap(b.exactCenterX(), b.exactCenterY()))
@@ -259,7 +265,9 @@ class InDriveStateMachine(
                     if (negotiationConfig.autoAccept) {
                         val b = parsed.acceptButtonBounds
                         if (b != null) {
-                            gestureDispatcher(GestureAction.Tap(b.exactCenterX(), b.exactCenterY()))
+                            if (canDispatch("ACCEPT:${lastOrderKey ?: "unknown"}", 1_500L)) {
+                                gestureDispatcher(GestureAction.Tap(b.exactCenterX(), b.exactCenterY()))
+                            }
                         } else {
                             logger(
                                 "ACCEPT_BUTTON_NOT_FOUND",
@@ -275,6 +283,7 @@ class InDriveStateMachine(
 
                 if (decision.shouldCounterOffer && decision.counterPrice != null) {
                     _currentState.value = AutomationState.NEGOTIATING
+                    if (!canDispatch("COUNTER:${lastOrderKey ?: "unknown"}")) return
                     currentAttemptCount++
 
                     val target = decision.counterPrice
@@ -411,12 +420,23 @@ class InDriveStateMachine(
 
     private suspend fun returnToRequests(parsed: InDriveParser.InDriveParsedScreen) {
         _currentState.value = AutomationState.RETURN_TO_REQUESTS
+        if (!canDispatch("RETURN:${lastOrderKey ?: "unknown"}:${parsed.screenType}", 900L)) return
         val close = parsed.closeButtonBounds
         if (close != null) {
             gestureDispatcher(GestureAction.Tap(close.exactCenterX(), close.exactCenterY()))
         } else {
             gestureDispatcher(GestureAction.Back)
         }
+    }
+
+    private fun canDispatch(signature: String, cooldownMs: Long = REPEAT_ACTION_GUARD_MS): Boolean {
+        val now = System.currentTimeMillis()
+        if (signature == lastActionSignature && now - lastActionAt < cooldownMs) {
+            return false
+        }
+        lastActionSignature = signature
+        lastActionAt = now
+        return true
     }
 
     private fun orderKey(card: InDriveParser.InDriveOrderCard): String =
