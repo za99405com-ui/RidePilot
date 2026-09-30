@@ -86,21 +86,88 @@ class DataStoreManager(private val context: Context) {
         )
     }
 
+    /**
+     * Low-level automation toggle. A hard-stopped session cannot be re-enabled
+     * through this method; only startAutomationFromApp() may clear HARD STOP.
+     */
     suspend fun setAutomationEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.AUTOMATION_ENABLED] = enabled }
-    }
-
-    suspend fun setEmergencyStop(stopped: Boolean) {
-        context.dataStore.edit {
-            it[PreferencesKeys.EMERGENCY_STOP] = stopped
-            if (stopped) {
-                it[PreferencesKeys.AUTOMATION_ENABLED] = false
+        context.dataStore.edit { prefs ->
+            if (enabled && prefs[PreferencesKeys.EMERGENCY_STOP] == true) {
+                prefs[PreferencesKeys.AUTOMATION_ENABLED] = false
+            } else {
+                prefs[PreferencesKeys.AUTOMATION_ENABLED] = enabled
             }
         }
     }
 
+    suspend fun setEmergencyStop(stopped: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.EMERGENCY_STOP] = stopped
+            if (stopped) {
+                prefs[PreferencesKeys.AUTOMATION_ENABLED] = false
+                prefs[PreferencesKeys.OVERLAY_ENABLED] = false
+            }
+        }
+    }
+
+    /**
+     * The only path that clears a hard stop and starts RidePilot again.
+     * This method is intentionally called from the RidePilot app UI, never
+     * from the floating overlay.
+     */
+    suspend fun startAutomationFromApp() {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.EMERGENCY_STOP] = false
+            prefs[PreferencesKeys.OVERLAY_ENABLED] = true
+            prefs[PreferencesKeys.AUTOMATION_ENABLED] = true
+        }
+    }
+
+    /**
+     * Temporary pause: keep the floating control available, but do not perform
+     * any ride automation until resumed.
+     */
+    suspend fun pauseAutomation() {
+        context.dataStore.edit { prefs ->
+            if (prefs[PreferencesKeys.EMERGENCY_STOP] != true) {
+                prefs[PreferencesKeys.AUTOMATION_ENABLED] = false
+                prefs[PreferencesKeys.OVERLAY_ENABLED] = true
+            }
+        }
+    }
+
+    /**
+     * Resume is allowed from the floating control only when HARD STOP is not set.
+     */
+    suspend fun resumeAutomationFromOverlay() {
+        context.dataStore.edit { prefs ->
+            if (prefs[PreferencesKeys.EMERGENCY_STOP] != true) {
+                prefs[PreferencesKeys.OVERLAY_ENABLED] = true
+                prefs[PreferencesKeys.AUTOMATION_ENABLED] = true
+            }
+        }
+    }
+
+    /**
+     * Full STOP. The overlay is disabled too, so Accessibility events cannot
+     * resurrect it. Restart requires startAutomationFromApp().
+     */
+    suspend fun hardStop() {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.EMERGENCY_STOP] = true
+            prefs[PreferencesKeys.AUTOMATION_ENABLED] = false
+            prefs[PreferencesKeys.OVERLAY_ENABLED] = false
+        }
+    }
+
     suspend fun setOverlayEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.OVERLAY_ENABLED] = enabled }
+        context.dataStore.edit { prefs ->
+            if (enabled && prefs[PreferencesKeys.EMERGENCY_STOP] == true) {
+                prefs[PreferencesKeys.OVERLAY_ENABLED] = false
+            } else {
+                prefs[PreferencesKeys.OVERLAY_ENABLED] = enabled
+            }
+        }
     }
 
     suspend fun setOcrFallbackEnabled(enabled: Boolean) {
