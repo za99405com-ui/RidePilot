@@ -177,7 +177,6 @@ class RidePilotAccessibilityService : AccessibilityService() {
                 _latestUberAnalysis.value = null
                 _automationStatus.value = "Uber: جاري قراءة الطلب"
                 ensureOverlayRunning()
-                schedulePostGestureRechecks()
                 return
             }
         }
@@ -354,7 +353,6 @@ class RidePilotAccessibilityService : AccessibilityService() {
                         dispatchGesture(gesture, object : GestureResultCallback() {
                             override fun onCompleted(gestureDescription: GestureDescription?) {
                                 schedulePostGestureRechecks()
-                                schedulePostGestureRechecks()
                                 if (cont.isActive) cont.resume(true)
                             }
                             override fun onCancelled(gestureDescription: GestureDescription?) {
@@ -372,6 +370,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
                         val gesture = GestureDescription.Builder().addStroke(stroke).build()
                         dispatchGesture(gesture, object : GestureResultCallback() {
                             override fun onCompleted(gestureDescription: GestureDescription?) {
+                                schedulePostGestureRechecks()
                                 if (cont.isActive) cont.resume(true)
                             }
                             override fun onCancelled(gestureDescription: GestureDescription?) {
