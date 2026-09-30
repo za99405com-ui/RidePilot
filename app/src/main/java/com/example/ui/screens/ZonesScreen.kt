@@ -106,6 +106,34 @@ fun ZonesScreen(
     var mapViewInstance by remember { mutableStateOf<MapView?>(null) }
     val drawMode = remember { mutableStateOf(false) }
 
+    fun redrawZoneSelection(mapView: MapView?, closed: Boolean = false) {
+        if (mapView == null) return
+        mapView.overlays.removeAll { it is Polyline || it is Polygon }
+
+        if (drawnPoints.size >= 2 && !closed) {
+            mapView.overlays.add(
+                Polyline(mapView).apply {
+                    setPoints(drawnPoints.toList())
+                    outlinePaint.color = 0xFF5B9CFF.toInt()
+                    outlinePaint.strokeWidth = 7f
+                }
+            )
+        }
+
+        if (drawnPoints.size >= 3 && closed) {
+            mapView.overlays.add(
+                Polygon(mapView).apply {
+                    points = drawnPoints.toList()
+                    fillPaint.color = 0x335B9CFF
+                    outlinePaint.color = 0xFF5B9CFF.toInt()
+                    outlinePaint.strokeWidth = 6f
+                }
+            )
+        }
+
+        mapView.invalidate()
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -119,8 +147,7 @@ fun ZonesScreen(
                     IconButton(onClick = {
                         drawMode.value = false
                         drawnPoints.clear()
-                        mapViewInstance?.overlays?.clear()
-                        mapViewInstance?.invalidate()
+                        redrawZoneSelection(mapViewInstance, closed = false)
                     }) {
                         Icon(Icons.Default.Refresh, contentDescription = "مسح النقاط", tint = AmberAccent)
                     }
@@ -162,70 +189,16 @@ fun ZonesScreen(
                             // Default to Alexandria center (31.2001, 29.9187)
                             controller.setCenter(GeoPoint(31.2200, 29.9500))
 
-                            // Freehand zone drawing: press "ابدأ الرسم", then trace the boundary
-                            // with one continuous finger gesture. This is much easier than placing corners.
+                            // Precise point-by-point zone drawing. A tap adds one corner;
+                            // dragging still pans the map because touch-move events are not consumed.
                             val touchOverlay = object : org.osmdroid.views.overlay.Overlay() {
-                                private var lastX = 0f
-                                private var lastY = 0f
-
-                                override fun onTouchEvent(event: MotionEvent?, mapView: MapView?): Boolean {
+                                override fun onSingleTapConfirmed(event: MotionEvent?, mapView: MapView?): Boolean {
                                     if (!drawMode.value || event == null || mapView == null) return false
 
-                                    fun addPoint(x: Float, y: Float) {
-                                        val p = mapView.projection.fromPixels(x.toInt(), y.toInt()) as GeoPoint
-                                        drawnPoints.add(p)
-
-                                        mapView.overlays.removeAll { it is Polyline || it is Polygon }
-                                        if (drawnPoints.size >= 2) {
-                                            mapView.overlays.add(
-                                                Polyline(mapView).apply {
-                                                    setPoints(drawnPoints.toList())
-                                                    outlinePaint.color = 0xFF5B9CFF.toInt()
-                                                    outlinePaint.strokeWidth = 7f
-                                                }
-                                            )
-                                        }
-                                        mapView.invalidate()
-                                    }
-
-                                    when (event.actionMasked) {
-                                        MotionEvent.ACTION_DOWN -> {
-                                            drawnPoints.clear()
-                                            mapView.overlays.removeAll { it is Polyline || it is Polygon }
-                                            lastX = event.x
-                                            lastY = event.y
-                                            addPoint(event.x, event.y)
-                                            return true
-                                        }
-
-                                        MotionEvent.ACTION_MOVE -> {
-                                            val dx = event.x - lastX
-                                            val dy = event.y - lastY
-                                            if ((dx * dx + dy * dy) >= 144f) {
-                                                lastX = event.x
-                                                lastY = event.y
-                                                addPoint(event.x, event.y)
-                                            }
-                                            return true
-                                        }
-
-                                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                                            if (drawnPoints.size >= 3) {
-                                                mapView.overlays.removeAll { it is Polyline || it is Polygon }
-                                                mapView.overlays.add(
-                                                    Polygon(mapView).apply {
-                                                        points = drawnPoints.toList()
-                                                        fillPaint.color = 0x335B9CFF
-                                                        outlinePaint.color = 0xFF5B9CFF.toInt()
-                                                        outlinePaint.strokeWidth = 6f
-                                                    }
-                                                )
-                                                drawMode.value = false
-                                            }
-                                            mapView.invalidate()
-                                            return true
-                                        }
-                                    }
+                                    val point = mapView.projection
+                                        .fromPixels(event.x.toInt(), event.y.toInt()) as GeoPoint
+                                    drawnPoints.add(point)
+                                    redrawZoneSelection(mapView, closed = false)
                                     return true
                                 }
                             }
@@ -245,9 +218,10 @@ fun ZonesScreen(
                 ) {
                     Text(
                         text = when {
-                            drawMode.value -> "ارسم حدود منطقة شغلك بإصبعك ثم ارفع إيدك"
-                            drawnPoints.size >= 3 -> "✓ المنطقة مرسومة — احفظها من زر +"
-                            else -> "حرّك الخريطة للمكان المطلوب ثم اضغط «ابدأ الرسم»"
+                            drawMode.value && drawnPoints.isEmpty() -> "اضغط على أركان المنطقة نقطة بنقطة"
+                            drawMode.value -> "تم تحديد ${drawnPoints.size} نقطة • اضغط إنهاء بعد 3 نقاط أو أكثر"
+                            drawnPoints.size >= 3 -> "✓ الزون جاهز — راجعه ثم احفظه"
+                            else -> "حرّك الخريطة للمكان المطلوب ثم ابدأ التحديد"
                         },
                         fontSize = 11.sp,
                         color = if (drawMode.value) AmberAccent else TextPrimary,
@@ -256,28 +230,63 @@ fun ZonesScreen(
                     )
                 }
 
-                Button(
-                    onClick = {
-                        if (!drawMode.value) {
-                            drawnPoints.clear()
-                            mapViewInstance?.overlays?.removeAll { it is Polyline || it is Polygon }
-                            mapViewInstance?.invalidate()
-                        }
-                        drawMode.value = !drawMode.value
-                    },
+                Row(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 12.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (drawMode.value) DangerRed else EmeraldPrimary
-                    ),
-                    shape = RoundedCornerShape(14.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        if (drawMode.value) "إلغاء الرسم" else "ابدأ الرسم",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold
-                    )
+                    if (!drawMode.value) {
+                        Button(
+                            onClick = {
+                                drawnPoints.clear()
+                                redrawZoneSelection(mapViewInstance, closed = false)
+                                drawMode.value = true
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Text("ابدأ التحديد", color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = {
+                                if (drawnPoints.isNotEmpty()) {
+                                    drawnPoints.removeAt(drawnPoints.lastIndex)
+                                    redrawZoneSelection(mapViewInstance, closed = false)
+                                }
+                            },
+                            enabled = drawnPoints.isNotEmpty(),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Text("تراجع", color = TextPrimary)
+                        }
+
+                        Button(
+                            onClick = {
+                                if (drawnPoints.size >= 3) {
+                                    drawMode.value = false
+                                    redrawZoneSelection(mapViewInstance, closed = true)
+                                }
+                            },
+                            enabled = drawnPoints.size >= 3,
+                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldPrimary),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Text("إنهاء", color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+
+                        TextButton(
+                            onClick = {
+                                drawMode.value = false
+                                drawnPoints.clear()
+                                redrawZoneSelection(mapViewInstance, closed = false)
+                            }
+                        ) {
+                            Text("إلغاء", color = DangerRed)
+                        }
+                    }
                 }
             }
 
