@@ -62,6 +62,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -128,6 +129,8 @@ fun ZonesScreen(navController: NavController) {
     val manualPoints = remember { mutableStateListOf<GeoPoint>() }
     val selectedNames = remember { mutableStateListOf<String>() }
     val selectedAreaIds = remember { mutableStateListOf<String>() }
+    val selectedAreaPolygons =
+        remember { mutableStateMapOf<String, List<List<GeoPoint>>>() }
 
     var editingGroupIndex by remember { mutableStateOf(0) }
     var editingExistingZone by remember { mutableStateOf<WorkZone?>(null) }
@@ -169,6 +172,7 @@ fun ZonesScreen(navController: NavController) {
         manualPoints.clear()
         selectedNames.clear()
         selectedAreaIds.clear()
+        selectedAreaPolygons.clear()
         editingExistingZone = null
         editingGroupIndex = 0
         zoneNameInput = ""
@@ -197,18 +201,6 @@ fun ZonesScreen(navController: NavController) {
 
         mapView.overlays.removeAll {
             it is Polygon || it is Polyline || it is Marker
-        }
-
-        AlexandriaZoneCatalog.areas.forEach { area ->
-            mapView.overlays.add(
-                Polygon(mapView).apply {
-                    points = area.polygon.map { GeoPoint(it.latitude, it.longitude) }
-                    title = area.name
-                    fillPaint.color = 0x00000000
-                    outlinePaint.color = 0x55397ED7
-                    outlinePaint.strokeWidth = 2f
-                }
-            )
         }
 
         zones.forEach { zone ->
@@ -318,32 +310,63 @@ fun ZonesScreen(navController: NavController) {
         }
     }
 
+    fun rebuildPresetPreview() {
+        previewGroups.clear()
+        selectedAreaIds.forEach { id ->
+            selectedAreaPolygons[id]?.let { groups ->
+                previewGroups.addAll(groups)
+            }
+        }
+    }
+
     fun togglePreset(area: AlexandriaZoneCatalog.AreaPreset) {
         val existingIndex = selectedAreaIds.indexOf(area.id)
 
         if (existingIndex >= 0) {
             selectedAreaIds.removeAt(existingIndex)
             if (existingIndex in selectedNames.indices) selectedNames.removeAt(existingIndex)
-            if (existingIndex in previewGroups.indices) previewGroups.removeAt(existingIndex)
+            selectedAreaPolygons.remove(area.id)
+            rebuildPresetPreview()
             updateAutoName()
             mapMessage = "تم إلغاء «${area.name}»"
             renderMap(mapViewInstance)
             return
         }
 
-        selectedAreaIds.add(area.id)
-        selectedNames.add(area.name)
-        previewGroups.add(
-            area.polygon.map { GeoPoint(it.latitude, it.longitude) }
-        )
-        updateAutoName()
-        mapMode = ZoneMapMode.BROWSE
-        mapMessage = "تم تحديد «${area.name}» • اختر مناطق أخرى أو اضغط دمج"
-        renderMap(mapViewInstance)
-        focusGroups(
-            listOf(area.polygon.map { GeoPoint(it.latitude, it.longitude) }),
-            14.0
-        )
+        if (isRecognizing) return
+
+        isRecognizing = true
+        mapMessage = "جار تحميل الحدود الحقيقية لـ «${area.name}»…"
+
+        scope.launch {
+            AreaBoundaryResolver.resolveByName(area.searchQuery)
+                .onSuccess { resolved ->
+                    val groups = resolved.polygons.map { polygon ->
+                        polygon.map { GeoPoint(it.latitude, it.longitude) }
+                    }
+
+                    if (groups.isEmpty()) {
+                        mapMessage = "لا توجد حدود Polygon متاحة لـ «${area.name}»"
+                    } else {
+                        selectedAreaIds.add(area.id)
+                        selectedNames.add(area.name)
+                        selectedAreaPolygons[area.id] = groups
+                        rebuildPresetPreview()
+                        updateAutoName()
+                        mapMode = ZoneMapMode.BROWSE
+                        mapMessage =
+                            "تم تحميل الحدود الحقيقية لـ «${area.name}» • يمكنك الدمج أو التعديل"
+                        renderMap(mapViewInstance)
+                        focusGroups(groups, 14.0)
+                    }
+                }
+                .onFailure {
+                    mapMessage =
+                        "تعذر تحميل حدود «${area.name}» • لن يتم رسم مستطيل بديل"
+                }
+
+            isRecognizing = false
+        }
     }
 
     suspend fun recognizeAt(point: GeoPoint) {
