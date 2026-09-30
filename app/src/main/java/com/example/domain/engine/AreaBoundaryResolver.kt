@@ -8,6 +8,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.sqrt
@@ -31,6 +32,8 @@ object AreaBoundaryResolver {
         .readTimeout(8, TimeUnit.SECONDS)
         .build()
 
+    private val namedAreaCache = ConcurrentHashMap<String, RecognizedArea>()
+
     suspend fun resolve(latitude: Double, longitude: Double): Result<RecognizedArea> =
         withContext(Dispatchers.IO) {
             runCatching {
@@ -48,6 +51,86 @@ object AreaBoundaryResolver {
                 error("تعذر العثور على حدود منطقة واضحة عند هذه النقطة")
             }
         }
+
+    /**
+     * Resolves a known Alexandria neighbourhood by name and returns only real
+     * polygon geometry. No rectangle/viewport fallback is ever generated.
+     */
+    suspend fun resolveByName(areaName: String): Result<RecognizedArea> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val key = areaName.trim()
+                namedAreaCache[key]?.let { return@runCatching it }
+
+                val query = "${key}, الإسكندرية, مصر"
+                val url = HttpUrl.Builder()
+                    .scheme("https")
+                    .host("nominatim.openstreetmap.org")
+                    .addPathSegment("search")
+                    .addQueryParameter("format", "jsonv2")
+                    .addQueryParameter("q", query)
+                    .addQueryParameter("limit", "10")
+                    .addQueryParameter("addressdetails", "1")
+                    .addQueryParameter("polygon_geojson", "1")
+                    .addQueryParameter("accept-language", "ar,en")
+                    .build()
+
+                val request = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "RidePilot/1.0 Android")
+                    .header("Accept", "application/json")
+                    .build()
+
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        error("تعذر الاتصال بمصدر الحدود")
+                    }
+
+                    val body = response.body?.string().orEmpty()
+                    if (body.isBlank()) error("لم يتم العثور على بيانات")
+
+                    val arr = JSONArray(body)
+                    val candidates = mutableListOf<RecognizedArea>()
+
+                    for (i in 0 until arr.length()) {
+                        val obj = arr.optJSONObject(i) ?: continue
+                        val display = obj.optString("display_name")
+                        if (
+                            !display.contains("الإسكندرية", ignoreCase = true) &&
+                            !display.contains("Alexandria", ignoreCase = true)
+                        ) {
+                            continue
+                        }
+
+                        parseResult(
+                            obj,
+                            obj.optDouble("lat", 0.0),
+                            obj.optDouble("lon", 0.0)
+                        )?.let { candidates.add(it) }
+                    }
+
+                    val exact = candidates.firstOrNull {
+                        normalizeName(it.name) == normalizeName(key)
+                    }
+
+                    val chosen = exact ?: candidates.firstOrNull()
+                        ?: error("المنطقة موجودة بالاسم لكن لا توجد لها حدود Polygon متاحة")
+
+                    namedAreaCache[key] = chosen
+                    chosen
+                }
+            }
+        }
+
+    private fun normalizeName(value: String): String =
+        value
+            .trim()
+            .lowercase()
+            .replace("أ", "ا")
+            .replace("إ", "ا")
+            .replace("آ", "ا")
+            .replace("ة", "ه")
+            .replace("\\s+".toRegex(), " ")
 
     private fun reverse(lat: Double, lon: Double, zoom: Int): JSONObject? {
         val url = HttpUrl.Builder()
