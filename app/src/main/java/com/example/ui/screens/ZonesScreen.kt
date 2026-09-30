@@ -703,10 +703,40 @@ fun ZonesScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 contentPadding = PaddingValues(bottom = 80.dp)
             ) {
-                items(zones) { zone ->
+                if (zones.isEmpty()) {
+                    item {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = DarkCard),
+                            shape = RoundedCornerShape(14.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(16.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Icon(Icons.Default.Layers, contentDescription = null, tint = TextMuted)
+                                Spacer(Modifier.height(7.dp))
+                                Text(
+                                    "لا توجد Zones محفوظة",
+                                    color = TextPrimary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    "استخدم «موقعي» ثم «تحديد تلقائي»، أو ارسم المنطقة يدويًا.",
+                                    color = TextSecondary,
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
+                items(zones, key = { it.id }) { zone ->
                     val pointCount = ZoneEngine.parsePolygonJson(zone.polygonJson).size
                     Card(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { focusZone(zone) },
                         colors = CardDefaults.cardColors(containerColor = DarkCard),
                         shape = RoundedCornerShape(14.dp)
                     ) {
@@ -839,7 +869,11 @@ fun ZonesScreen(
                                 )
                                 showCreateDialog = false
                                 zoneNameInput = ""
+                                zoneKeywordsInput = ""
                                 drawnPoints.clear()
+                                drawMode = false
+                                selectionClosed = false
+                                renderMap(mapViewInstance)
                             }
                         }
                     },
