@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -79,6 +80,7 @@ import androidx.navigation.NavController
 import com.example.RidePilotApplication
 import com.example.data.model.LatLngPoint
 import com.example.data.model.WorkZone
+import com.example.domain.engine.AlexandriaZoneCatalog
 import com.example.domain.engine.AreaBoundaryResolver
 import com.example.domain.engine.ZoneEngine
 import com.example.ui.theme.AmberAccent
@@ -96,6 +98,7 @@ import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.launch
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
@@ -134,7 +137,7 @@ fun ZonesScreen(navController: NavController) {
     var zoneKeywordsInput by remember { mutableStateOf("") }
 
     var isRecognizing by remember { mutableStateOf(false) }
-    var mapMessage by remember { mutableStateOf("اضغط «اختيار منطقة» ثم اضغط داخل أي منطقة على الخريطة") }
+    var mapMessage by remember { mutableStateOf("اختر اسم المنطقة من القائمة وسيتم تحديدها فورًا") }
 
     var currentLocation by remember { mutableStateOf<GeoPoint?>(null) }
     var isLocating by remember { mutableStateOf(false) }
@@ -194,6 +197,18 @@ fun ZonesScreen(navController: NavController) {
 
         mapView.overlays.removeAll {
             it is Polygon || it is Polyline || it is Marker
+        }
+
+        AlexandriaZoneCatalog.areas.forEach { area ->
+            mapView.overlays.add(
+                Polygon(mapView).apply {
+                    points = area.polygon.map { GeoPoint(it.latitude, it.longitude) }
+                    title = area.name
+                    fillPaint.color = 0x00000000
+                    outlinePaint.color = 0x55397ED7
+                    outlinePaint.strokeWidth = 2f
+                }
+            )
         }
 
         zones.forEach { zone ->
@@ -297,7 +312,38 @@ fun ZonesScreen(navController: NavController) {
         if (selectedNames.isNotEmpty()) {
             zoneNameInput = selectedNames.distinct().joinToString(" + ")
             zoneKeywordsInput = selectedNames.distinct().joinToString(",")
+        } else {
+            zoneNameInput = ""
+            zoneKeywordsInput = ""
         }
+    }
+
+    fun togglePreset(area: AlexandriaZoneCatalog.AreaPreset) {
+        val existingIndex = selectedAreaIds.indexOf(area.id)
+
+        if (existingIndex >= 0) {
+            selectedAreaIds.removeAt(existingIndex)
+            if (existingIndex in selectedNames.indices) selectedNames.removeAt(existingIndex)
+            if (existingIndex in previewGroups.indices) previewGroups.removeAt(existingIndex)
+            updateAutoName()
+            mapMessage = "تم إلغاء «${area.name}»"
+            renderMap(mapViewInstance)
+            return
+        }
+
+        selectedAreaIds.add(area.id)
+        selectedNames.add(area.name)
+        previewGroups.add(
+            area.polygon.map { GeoPoint(it.latitude, it.longitude) }
+        )
+        updateAutoName()
+        mapMode = ZoneMapMode.BROWSE
+        mapMessage = "تم تحديد «${area.name}» • اختر مناطق أخرى أو اضغط دمج"
+        renderMap(mapViewInstance)
+        focusGroups(
+            listOf(area.polygon.map { GeoPoint(it.latitude, it.longitude) }),
+            14.0
+        )
     }
 
     suspend fun recognizeAt(point: GeoPoint) {
@@ -593,7 +639,17 @@ fun ZonesScreen(navController: NavController) {
                             setTileSource(TileSourceFactory.MAPNIK)
                             setMultiTouchControls(true)
                             setBuiltInZoomControls(false)
-                            controller.setZoom(11.5)
+                            minZoomLevel = 10.5
+                            maxZoomLevel = 19.0
+                            setScrollableAreaLimitDouble(
+                                BoundingBox(
+                                    AlexandriaZoneCatalog.alexandriaNorth,
+                                    AlexandriaZoneCatalog.alexandriaEast,
+                                    AlexandriaZoneCatalog.alexandriaSouth,
+                                    AlexandriaZoneCatalog.alexandriaWest
+                                )
+                            )
+                            controller.setZoom(11.7)
                             controller.setCenter(GeoPoint(31.2001, 29.9187))
 
                             val touchOverlay = object : org.osmdroid.views.overlay.Overlay() {
