@@ -32,6 +32,8 @@ object InDriveParser {
         val activeOffer: RideOffer?,
         val quickOfferButtons: Map<Double, Rect>,
         val customOfferEditButtonBounds: Rect?,
+        val customOfferInputNode: AccessibilityNodeInfo?,
+        val customOfferInputText: String?,
         val submitOfferButtonBounds: Rect?,
         val closeButtonBounds: Rect?,
         val acceptButtonBounds: Rect?,
@@ -49,6 +51,8 @@ object InDriveParser {
                 activeOffer = null,
                 quickOfferButtons = emptyMap(),
                 customOfferEditButtonBounds = null,
+                customOfferInputNode = null,
+                customOfferInputText = null,
                 submitOfferButtonBounds = null,
                 closeButtonBounds = null,
                 acceptButtonBounds = null,
@@ -67,6 +71,8 @@ object InDriveParser {
 
         val quickOfferMap = mutableMapOf<Double, Rect>()
         var editButtonBounds: Rect? = null
+        var customOfferInputNode: AccessibilityNodeInfo? = null
+        var customOfferInputText: String? = null
         var submitButtonBounds: Rect? = null
         var closeButtonBounds: Rect? = null
         var acceptButtonBounds: Rect? = null
@@ -76,6 +82,11 @@ object InDriveParser {
         // Find offline / online status
         fun inspectNode(node: AccessibilityNodeInfo) {
             val text = (node.text?.toString() ?: node.contentDescription?.toString())?.trim() ?: ""
+
+            if (node.isEditable || node.className?.toString() == "android.widget.EditText") {
+                customOfferInputNode = node
+                customOfferInputText = text.ifBlank { null }
+            }
 
             if (text.contains("غير متصل")) {
                 isOffline = true
@@ -191,6 +202,8 @@ object InDriveParser {
             activeOffer = activeOffer,
             quickOfferButtons = quickOfferMap,
             customOfferEditButtonBounds = editButtonBounds,
+            customOfferInputNode = customOfferInputNode,
+            customOfferInputText = customOfferInputText,
             submitOfferButtonBounds = submitButtonBounds,
             closeButtonBounds = closeButtonBounds,
             acceptButtonBounds = acceptButtonBounds,
@@ -266,7 +279,7 @@ object InDriveParser {
         }
         collect(root)
 
-        val priceText = texts.firstOrNull { it.contains("EGP") || it.contains("E£") }
+        val priceText = texts.firstOrNull { it.contains("EGP") || it.contains("E£") || it.contains("ج.م") }
         val price = ArabicNumberHelper.extractFirstDouble(priceText)
 
         val distText = texts.firstOrNull { it.contains("كلم") || it.contains("كم") }
