@@ -37,6 +37,7 @@ class DataStoreManager(private val context: Context) {
         val NEGOTIATION_AUTO_COUNTER = booleanPreferencesKey("negotiation_auto_counter")
 
         val CONFIDENCE_THRESHOLD = intPreferencesKey("confidence_threshold")
+        val V3_AUTOMATION_DEFAULTS_APPLIED = booleanPreferencesKey("v3_automation_defaults_applied")
     }
 
     val automationEnabled: Flow<Boolean> = context.dataStore.data.map {
@@ -120,6 +121,16 @@ class DataStoreManager(private val context: Context) {
 
     suspend fun setConfidenceThreshold(threshold: Int) {
         context.dataStore.edit { it[PreferencesKeys.CONFIDENCE_THRESHOLD] = threshold }
+    }
+
+    suspend fun applyV3AutomationDefaultsOnce() {
+        context.dataStore.edit { prefs ->
+            if (prefs[PreferencesKeys.V3_AUTOMATION_DEFAULTS_APPLIED] != true) {
+                prefs[PreferencesKeys.NEGOTIATION_AUTO_ACCEPT] = true
+                prefs[PreferencesKeys.NEGOTIATION_AUTO_COUNTER] = true
+                prefs[PreferencesKeys.V3_AUTOMATION_DEFAULTS_APPLIED] = true
+            }
+        }
     }
 
     suspend fun updateNegotiationConfig(config: NegotiationConfig) {
