@@ -36,7 +36,15 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null || true
           "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
-      - name: Create debug keystore
+      - name: Restore persistent debug keystore
+        id: debug-keystore-cache
+        uses: actions/cache@v4
+        with:
+          path: debug.keystore
+          key: ridepilot-debug-keystore-v1
+
+      - name: Create debug keystore once
+        if: steps.debug-keystore-cache.outputs.cache-hit != 'true'
         run: |
           keytool -genkeypair -v \
             -keystore debug.keystore \
@@ -46,7 +54,7 @@ jobs:
             -keyalg RSA \
             -keysize 2048 \
             -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
+            -dname "CN=RidePilot Debug,O=RidePilot,C=EG"
 
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace
