@@ -157,6 +157,35 @@ class RidePilotAccessibilityService : AccessibilityService() {
     private suspend fun handleRelevantWindows() {
         val app = RidePilotApplication.instance
 
+        // Runtime mode is checked before touching Uber or inDrive. HARD STOP is
+        // terminal for the floating controller: Accessibility may stay connected
+        // at the Android level, but RidePilot does not read/analyse/control rides
+        // and cannot recreate the overlay until the app explicitly starts again.
+        val emergencyStop = app.settingsRepository.emergencyStop.first()
+        val automationEnabled = app.settingsRepository.automationEnabled.first()
+        val overlayEnabled = app.settingsRepository.overlayEnabled.first()
+
+        if (emergencyStop || !overlayEnabled) {
+            _activeTarget.value = null
+            _latestUberAnalysis.value = null
+            _latestInDriveParsed.value = null
+            _automationStatus.value = "STOP — التشغيل من تطبيق RidePilot فقط"
+            if (RidePilotOverlayService.isOverlayRunning) {
+                stopService(Intent(applicationContext, RidePilotOverlayService::class.java))
+            }
+            return
+        }
+
+        // Temporary pause keeps the floating control available for Resume, but
+        // performs no ride analysis and dispatches no gesture.
+        if (!automationEnabled) {
+            _activeTarget.value = null
+            _latestUberAnalysis.value = null
+            _automationStatus.value = "متوقف مؤقتًا"
+            ensureOverlayRunning()
+            return
+        }
+
         // Uber cards can appear as a floating window over inDrive. Always inspect Uber
         // first; while an Uber offer is visible we only analyse it and avoid tapping the
         // inDrive window underneath.
@@ -196,8 +225,6 @@ class RidePilotAccessibilityService : AccessibilityService() {
             _liveCalibrationOffer.value = parsedScreen.activeOffer
         }
 
-        val automationEnabled = app.settingsRepository.automationEnabled.first()
-        val emergencyStop = app.settingsRepository.emergencyStop.first()
         val swipeDir = app.settingsRepository.swipeDirection.first()
         val distMode = app.settingsRepository.pricingDistanceMode.first()
         val zoneMode = app.settingsRepository.zoneVerificationMode.first()
@@ -223,7 +250,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
         // Accessibility events are not guaranteed for every inDrive animation.
         // Keep a lightweight read loop only while automation is active and inDrive
         // is visible so the next state is picked up without the user touching the app.
-        if (automationEnabled && !emergencyStop) {
+        if (automationEnabled) {
             val nextDelay = when (parsedScreen.screenType) {
                 InDriveParser.InDriveScreenType.WAITING_RESPONSE -> 320L
                 InDriveParser.InDriveScreenType.COUNTER_OFFER_INPUT -> 140L
