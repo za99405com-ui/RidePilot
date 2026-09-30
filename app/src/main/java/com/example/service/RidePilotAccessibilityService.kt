@@ -85,6 +85,9 @@ class RidePilotAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         _isServiceConnected.value = true
+        serviceScope.launch {
+            RidePilotApplication.instance.settingsRepository.applyV3AutomationDefaultsOnce()
+        }
         Log.i(TAG, "RidePilot Accessibility Service Connected")
     }
 
