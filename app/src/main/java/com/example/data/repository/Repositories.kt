@@ -49,6 +49,10 @@ class SettingsRepository(private val dataStoreManager: DataStoreManager) {
 
     suspend fun setAutomationEnabled(enabled: Boolean) = dataStoreManager.setAutomationEnabled(enabled)
     suspend fun setEmergencyStop(stopped: Boolean) = dataStoreManager.setEmergencyStop(stopped)
+    suspend fun startAutomationFromApp() = dataStoreManager.startAutomationFromApp()
+    suspend fun pauseAutomation() = dataStoreManager.pauseAutomation()
+    suspend fun resumeAutomationFromOverlay() = dataStoreManager.resumeAutomationFromOverlay()
+    suspend fun hardStop() = dataStoreManager.hardStop()
     suspend fun setOverlayEnabled(enabled: Boolean) = dataStoreManager.setOverlayEnabled(enabled)
     suspend fun setOcrFallbackEnabled(enabled: Boolean) = dataStoreManager.setOcrFallbackEnabled(enabled)
     suspend fun setPricingDistanceMode(mode: PricingDistanceMode) = dataStoreManager.setPricingDistanceMode(mode)
