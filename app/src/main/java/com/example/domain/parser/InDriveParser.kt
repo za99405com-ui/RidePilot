@@ -224,10 +224,31 @@ object InDriveParser {
             else -> InDriveScreenType.UNKNOWN
         }
 
-        // Parse active order if in order details
+        // Parse active order if in order details.
+        // Some inDrive builds split the modal between map/header and bottom sheet.
+        // Parse the focused container first, then fall back to the full root only
+        // when important fields are missing. Pick the more complete result.
         var activeOffer: RideOffer? = null
-        if (screenType == InDriveScreenType.ORDER_DETAILS || screenType == InDriveScreenType.COUNTER_OFFER_INPUT) {
-            activeOffer = extractActiveOrderDetails(findDetailsContainer(root) ?: root)
+        if (
+            screenType == InDriveScreenType.ORDER_DETAILS ||
+            screenType == InDriveScreenType.COUNTER_OFFER_INPUT
+        ) {
+            val focusedRoot = findDetailsContainer(root)
+            val focusedOffer = extractActiveOrderDetails(focusedRoot ?: root)
+
+            val needsFallback =
+                focusedOffer == null ||
+                    focusedOffer.displayedPrice == null ||
+                    focusedOffer.tripDistanceKm == null ||
+                    focusedOffer.pickupAddress.isNullOrBlank() ||
+                    focusedOffer.destinationAddress.isNullOrBlank()
+
+            val fullOffer = if (needsFallback && focusedRoot !== root) {
+                extractActiveOrderDetails(root)
+            } else null
+
+            activeOffer = listOfNotNull(focusedOffer, fullOffer)
+                .maxByOrNull(::offerCompletenessScore)
         }
 
         var confidence = 50
@@ -470,6 +491,16 @@ object InDriveParser {
         }
 
         return best
+    }
+
+    private fun offerCompletenessScore(offer: RideOffer): Int {
+        var score = offer.confidence
+        if (offer.displayedPrice != null) score += 20
+        if (offer.pickupDistanceKm != null) score += 15
+        if (offer.tripDistanceKm != null) score += 25
+        if (!offer.pickupAddress.isNullOrBlank()) score += 15
+        if (!offer.destinationAddress.isNullOrBlank()) score += 15
+        return score
     }
 
     private fun extractActiveOrderDetails(root: AccessibilityNodeInfo): RideOffer? {
