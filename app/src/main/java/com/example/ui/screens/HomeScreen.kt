@@ -43,10 +43,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -345,7 +343,14 @@ fun HomeScreen(navController: NavController) {
 
 @Composable
 private fun InDriveMapPreviewCard(preview: InDriveMapPreview) {
-    var mapView by remember { mutableStateOf<MapView?>(null) }
+    val context = LocalContext.current
+    val mapView = remember(context) {
+        MapView(context).apply {
+            setTileSource(TileSourceFactory.MAPNIK)
+            setMultiTouchControls(true)
+            setBuiltInZoomControls(false)
+        }
+    }
 
     Card(
         colors = CardDefaults.cardColors(containerColor = DarkCard),
@@ -375,14 +380,7 @@ private fun InDriveMapPreviewCard(preview: InDriveMapPreview) {
             Spacer(Modifier.height(8.dp))
 
             AndroidView(
-                factory = { ctx ->
-                    MapView(ctx).apply {
-                        setTileSource(TileSourceFactory.MAPNIK)
-                        setMultiTouchControls(true)
-                        setBuiltInZoomControls(false)
-                        mapView = this
-                    }
-                },
+                factory = { mapView },
                 update = { map ->
                     map.overlays.removeAll { it is Marker || it is Polyline }
 
@@ -427,7 +425,6 @@ private fun InDriveMapPreviewCard(preview: InDriveMapPreview) {
                         48
                     )
                     map.invalidate()
-                    mapView = map
                 },
                 modifier = Modifier
                     .fillMaxWidth()
@@ -458,9 +455,10 @@ private fun InDriveMapPreviewCard(preview: InDriveMapPreview) {
     }
 
     DisposableEffect(mapView) {
-        mapView?.onResume()
+        mapView.onResume()
         onDispose {
-            mapView?.onPause()
+            mapView.onPause()
+            mapView.onDetach()
         }
     }
 }
