@@ -63,6 +63,7 @@ fun AdvancedSettingsScreen(
     val zoneMode by app.settingsRepository.zoneVerificationMode.collectAsState(initial = ZoneVerificationMode.BOTH_PICKUP_AND_DESTINATION)
     val swipeDir by app.settingsRepository.swipeDirection.collectAsState(initial = SwipeDirection.SWIPE_LEFT)
     val confidenceThreshold by app.settingsRepository.confidenceThreshold.collectAsState(initial = 70)
+    val maxPickupDistanceKm by app.settingsRepository.maxPickupDistanceKm.collectAsState(initial = 5.0)
     val ocrFallback by app.settingsRepository.ocrFallbackEnabled.collectAsState(initial = false)
 
     Scaffold(
@@ -136,6 +137,67 @@ fun AdvancedSettingsScreen(
                                 )
                             )
                         }
+                    }
+                }
+            }
+
+            // Maximum pickup distance shown on each inDrive request card
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = DarkCard),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "أقصى مسافة بينك وبين العميل",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = "يستخدم المسافة المكتوبة أعلى طلب inDrive قبل فتح الطلب.",
+                                    fontSize = 11.sp,
+                                    color = TextSecondary,
+                                    modifier = Modifier.padding(top = 4.dp)
+                                )
+                            }
+                            Text(
+                                text = String.format("%.1f كم", maxPickupDistanceKm),
+                                color = EmeraldPrimary,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Slider(
+                            value = maxPickupDistanceKm.toFloat(),
+                            onValueChange = { value ->
+                                scope.launch {
+                                    app.settingsRepository.setMaxPickupDistanceKm(value.toDouble())
+                                }
+                            },
+                            valueRange = 0.5f..15f,
+                            steps = 28,
+                            colors = SliderDefaults.colors(
+                                thumbColor = EmeraldPrimary,
+                                activeTrackColor = EmeraldPrimary
+                            )
+                        )
+
+                        Text(
+                            text = "أي طلب أبعد من هذا الحد يتم تجاهله قبل فتحه.",
+                            fontSize = 11.sp,
+                            color = TextMuted
+                        )
                     }
                 }
             }
