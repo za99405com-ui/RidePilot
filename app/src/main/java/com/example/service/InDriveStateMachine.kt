@@ -97,15 +97,6 @@ class InDriveStateMachine(
             return
         }
 
-        if (parsed.offlineButtonBounds != null && !parsed.isOffline) {
-            _currentState.value = AutomationState.ENSURE_OFFLINE
-            if (!canDispatch("ENSURE_OFFLINE", 1_500L)) return
-            logger("ENSURE_OFFLINE", "إرجاع inDrive إلى وضع غير متصل", null, null, parsed.confidence)
-            val b = parsed.offlineButtonBounds
-            gestureDispatcher(GestureAction.Tap(b.exactCenterX(), b.exactCenterY()))
-            return
-        }
-
         when (parsed.screenType) {
             InDriveParser.InDriveScreenType.REQUESTS_LIST -> {
                 _currentState.value = AutomationState.REQUESTS_PAGE
@@ -131,25 +122,67 @@ class InDriveStateMachine(
                     }
                 }
 
-                val card = parsed.orderCards.firstOrNull { order ->
-                    val pickupKm = order.distanceKm
-                    pickupKm != null && pickupKm <= maxPickupDistanceKm
+                var card: InDriveParser.InDriveOrderCard? = null
+
+                for (candidate in parsed.orderCards) {
+                    val pickupKm = candidate.distanceKm
+
+                    // The small distance printed above the fare is the distance
+                    // between the driver and the passenger. Remove cards beyond
+                    // the user's configured limit before opening them.
+                    if (pickupKm != null && pickupKm > maxPickupDistanceKm) {
+                        if (canDispatch("HIDE_FAR:${orderKey(candidate)}", 1_500L)) {
+                            logger(
+                                "PICKUP_TOO_FAR",
+                                "إخفاء طلب بعيد: ${pickupKm} كم > ${maxPickupDistanceKm} كم",
+                                candidate.priceEgp,
+                                pickupKm,
+                                parsed.confidence
+                            )
+                            swipeCard(candidate.bounds, swipeDirection)
+                        }
+                        return
+                    }
+
+                    // When A/B addresses are visible on the list, verify the work
+                    // zone before opening the card. Never hide a card on an
+                    // inconclusive lookup; leave it for a later refresh instead.
+                    if (
+                        !candidate.pickupAddress.isNullOrBlank() &&
+                        !candidate.destinationAddress.isNullOrBlank()
+                    ) {
+                        val listZone = ZoneEngine.evaluateOffer(
+                            context = context,
+                            pickupAddress = candidate.pickupAddress,
+                            destinationAddress = candidate.destinationAddress,
+                            zones = zones,
+                            mode = zoneVerificationMode
+                        )
+
+                        if (listZone.isConclusive && !listZone.isAllowed) {
+                            if (canDispatch("HIDE_ZONE:${orderKey(candidate)}", 1_500L)) {
+                                logger(
+                                    "OUT_OF_ZONE_LIST",
+                                    "إخفاء طلب خارج حدود الخريطة قبل فتحه",
+                                    candidate.priceEgp,
+                                    pickupKm,
+                                    parsed.confidence
+                                )
+                                swipeCard(candidate.bounds, swipeDirection)
+                            }
+                            return
+                        }
+
+                        if (!listZone.isConclusive) {
+                            continue
+                        }
+                    }
+
+                    card = candidate
+                    break
                 }
 
                 if (card == null) {
-                    val nearest = parsed.orderCards
-                        .mapNotNull { it.distanceKm }
-                        .minOrNull()
-
-                    if (nearest != null) {
-                        logger(
-                            "PICKUP_TOO_FAR",
-                            "لا يوجد طلب داخل حد الوصول ${maxPickupDistanceKm} كم • الأقرب ${nearest} كم",
-                            null,
-                            nearest,
-                            parsed.confidence
-                        )
-                    }
                     return
                 }
 
@@ -199,6 +232,20 @@ class InDriveStateMachine(
                         offer?.tripDistanceKm,
                         offer?.confidence ?: parsed.confidence
                     )
+                    return
+                }
+
+                val detailPickupKm = offer.pickupDistanceKm
+                if (detailPickupKm != null && detailPickupKm > maxPickupDistanceKm) {
+                    pendingSwipeAfterReturn = openedCardBounds != null
+                    logger(
+                        "PICKUP_TOO_FAR_DETAILS",
+                        "إخفاء الطلب بعد التحقق: الوصول ${detailPickupKm} كم > ${maxPickupDistanceKm} كم",
+                        offer.displayedPrice,
+                        detailPickupKm,
+                        offer.confidence
+                    )
+                    returnToRequests(parsed)
                     return
                 }
 
@@ -266,6 +313,23 @@ class InDriveStateMachine(
                     return
                 }
 
+                // inDrive caps a driver's counter at +50% of the passenger fare.
+                // If the user's configured minimum itself is above that ceiling,
+                // this ride can never reach the required price, so hide it.
+                val platformMaxCounter = passengerPrice * 1.5
+                if (calc.minimumPrice > platformMaxCounter + 0.01) {
+                    pendingSwipeAfterReturn = openedCardBounds != null
+                    logger(
+                        "INDRIVE_COUNTER_CAP",
+                        "إخفاء الطلب: الحد المطلوب ${calc.minimumPrice.toInt()} ج أعلى من أقصى عرض مسموح ${platformMaxCounter.toInt()} ج",
+                        passengerPrice,
+                        pricingDistance,
+                        offer.confidence
+                    )
+                    returnToRequests(parsed)
+                    return
+                }
+
                 val decision = NegotiationEngine.evaluatePriceAndNegotiate(
                     passengerPrice = passengerPrice,
                     floorMinimum = calc.minimumPrice,
@@ -307,9 +371,12 @@ class InDriveStateMachine(
                     if (!canDispatch("COUNTER:${lastOrderKey ?: "unknown"}")) return
                     currentAttemptCount++
 
-                    val target = decision.counterPrice
+                    val target = minOf(decision.counterPrice, platformMaxCounter)
                     val eligible = parsed.quickOfferButtons
-                        .filterKeys { it >= calc.minimumPrice }
+                        .filterKeys {
+                            it >= calc.minimumPrice &&
+                                it <= platformMaxCounter + 0.01
+                        }
 
                     // Use a preset only when it is essentially the price calculated by
                     // the negotiation engine. Otherwise open the pencil/custom offer;
