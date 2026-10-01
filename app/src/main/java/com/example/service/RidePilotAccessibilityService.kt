@@ -78,6 +78,8 @@ class RidePilotAccessibilityService : AccessibilityService() {
     private val passiveRecheckScheduled = AtomicBoolean(false)
     private val postGestureRecheckToken = AtomicInteger(0)
     private val uberLockActive = AtomicBoolean(false)
+    private val forceInDriveCycle = AtomicBoolean(false)
+    private var lastRequestsAutomationAt = 0L
     private var lastMapPreviewKey: String? = null
     private var mapPreviewJob: Job? = null
 
@@ -195,6 +197,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
 
         if (emergencyStop || !overlayEnabled) {
             stateMachine.reset()
+            lastRequestsAutomationAt = 0L
             _activeTarget.value = null
             _latestUberAnalysis.value = null
             _latestInDriveParsed.value = null
@@ -211,6 +214,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
         // performs no ride analysis and dispatches no gesture.
         if (!automationEnabled) {
             stateMachine.reset()
+            lastRequestsAutomationAt = 0L
             _activeTarget.value = null
             _latestUberAnalysis.value = null
             _latestInDriveParsed.value = null
@@ -261,6 +265,20 @@ class RidePilotAccessibilityService : AccessibilityService() {
         _latestInDriveParsed.value = sanitizeForUi(parsedScreen)
         if (parsedScreen.activeOffer != null) {
             _liveCalibrationOffer.value = parsedScreen.activeOffer
+        }
+
+        val forcedCycle = forceInDriveCycle.getAndSet(false)
+        if (parsedScreen.screenType == InDriveParser.InDriveScreenType.REQUESTS_LIST) {
+            val now = System.currentTimeMillis()
+            if (!forcedCycle && now - lastRequestsAutomationAt < 10_000L) {
+                ensureOverlayRunning()
+                return
+            }
+            lastRequestsAutomationAt = now
+        } else {
+            // Screen transitions/details are handled immediately and do not consume
+            // the 10-second list refresh window.
+            lastRequestsAutomationAt = 0L
         }
 
         val swipeDir = app.settingsRepository.swipeDirection.first()
@@ -496,14 +514,17 @@ class RidePilotAccessibilityService : AccessibilityService() {
         serviceScope.launch {
             delay(90)
             if (postGestureRecheckToken.get() != token) return@launch
+            forceInDriveCycle.set(true)
             requestWindowProcessing()
 
             delay(160)
             if (postGestureRecheckToken.get() != token) return@launch
+            forceInDriveCycle.set(true)
             requestWindowProcessing()
 
             delay(300)
             if (postGestureRecheckToken.get() != token) return@launch
+            forceInDriveCycle.set(true)
             requestWindowProcessing()
         }
     }
