@@ -306,17 +306,33 @@ object InDriveParser {
                     val dist = ArabicNumberHelper.extractDistanceKm(distText)
 
                     if (price != null && price > 0.0 && dist != null && dist > 0.0) {
-                        val addressCandidates = childTexts.filter {
-                            it != priceText &&
-                                it != distText &&
-                                !it.contains("EGP", ignoreCase = true) &&
-                                !it.contains("E£", ignoreCase = true) &&
-                                !it.contains("ج.م") &&
-                                !it.contains("سداد") &&
-                                !it.contains("★") &&
-                                !it.contains("طلب ركوب") &&
-                                it.length > 5
+                        val cleanTexts = childTexts
+                            .map { it.trim() }
+                            .distinct()
+                            .filter {
+                                it != priceText &&
+                                    it != distText &&
+                                    !it.contains("EGP", ignoreCase = true) &&
+                                    !it.contains("E£", ignoreCase = true) &&
+                                    !it.contains("ج.م") &&
+                                    !it.contains("سداد") &&
+                                    !it.contains("InstaPay", ignoreCase = true) &&
+                                    !it.contains("★") &&
+                                    !it.contains("دقيقة") &&
+                                    !it.contains("طلب ركوب") &&
+                                    !Regex("""^\(?\d+(?:[.,]\d+)?\)?$""").matches(
+                                        ArabicNumberHelper.normalizeDigits(it)
+                                    ) &&
+                                    it.length >= 8
+                            }
+
+                        val likelyAddresses = cleanTexts.filter {
+                            addressLikelihoodScore(it) >= 2
                         }
+
+                        val addressCandidates =
+                            if (likelyAddresses.size >= 2) likelyAddresses
+                            else cleanTexts.filter { it.length >= 12 }
 
                         candidates.add(
                             InDriveOrderCard(
@@ -372,6 +388,25 @@ object InDriveParser {
             .sortedBy { it.bounds.top }
 
         cardsOut.addAll(unique)
+    }
+
+    private fun addressLikelihoodScore(text: String): Int {
+        var score = 0
+        if (text.length >= 18) score += 1
+        if (
+            text.contains("(") || text.contains(")") ||
+            text.contains(",") || text.contains("،")
+        ) score += 1
+
+        val locationHints = listOf(
+            "street", "road", "branch", "mosque", "central",
+            "sidi", "montaza", "smouha", "moharam", "alexandria",
+            "شارع", "طريق", "قسم", "فرع", "عزبة", "موقف", "مديرية",
+            "مسجد", "ميامي", "سيدي", "المنتزه", "سموحة", "محرم", "الإسكندرية"
+        )
+        if (locationHints.any { text.contains(it, ignoreCase = true) }) score += 2
+
+        return score
     }
 
     /**
