@@ -72,7 +72,8 @@ class RidePilotAccessibilityService : AccessibilityService() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val lastEventByPackage = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    private val debounceMs = 25L
+    private val inDriveEventDebounceMs = 250L
+    private val uberEventDebounceMs = 80L
     private val processing = AtomicBoolean(false)
     private val pendingRecheck = AtomicBoolean(false)
     private val passiveRecheckScheduled = AtomicBoolean(false)
@@ -82,6 +83,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
     private var lastRequestsAutomationAt = 0L
     private var lastMapPreviewKey: String? = null
     private var mapPreviewJob: Job? = null
+    private var passiveRecheckJob: Job? = null
 
     private val stateMachine by lazy {
         InDriveStateMachine(
@@ -152,6 +154,9 @@ class RidePilotAccessibilityService : AccessibilityService() {
 
         val now = System.currentTimeMillis()
         val last = lastEventByPackage[packageName] ?: 0L
+        val debounceMs =
+            if (packageName == UBER_DRIVER_PACKAGE) uberEventDebounceMs
+            else inDriveEventDebounceMs
         if (now - last < debounceMs) return
         lastEventByPackage[packageName] = now
 
@@ -166,12 +171,20 @@ class RidePilotAccessibilityService : AccessibilityService() {
 
         serviceScope.launch {
             try {
-                while (pendingRecheck.getAndSet(false)) {
+                var firstPass = true
+                while (firstPass || pendingRecheck.getAndSet(false)) {
+                    firstPass = false
                     try {
                         handleRelevantWindows()
                     } catch (e: Exception) {
                         Log.e(TAG, "Error handling ride windows", e)
                         _automationStatus.value = "خطأ في القراءة"
+                    }
+
+                    // Accessibility animations can emit events continuously.
+                    // Yield between conflated passes instead of spinning at full speed.
+                    if (pendingRecheck.get()) {
+                        delay(120)
                     }
                 }
             } finally {
@@ -182,6 +195,19 @@ class RidePilotAccessibilityService : AccessibilityService() {
                 }
             }
         }
+    }
+
+    private fun cancelTransientWork() {
+        mapPreviewJob?.cancel()
+        mapPreviewJob = null
+        lastMapPreviewKey = null
+
+        passiveRecheckJob?.cancel()
+        passiveRecheckJob = null
+        passiveRecheckScheduled.set(false)
+
+        postGestureRecheckToken.incrementAndGet()
+        pendingRecheck.set(false)
     }
 
     private suspend fun handleRelevantWindows() {
@@ -196,6 +222,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
         val overlayEnabled = app.settingsRepository.overlayEnabled.first()
 
         if (emergencyStop || !overlayEnabled) {
+            cancelTransientWork()
             stateMachine.reset()
             lastRequestsAutomationAt = 0L
             _activeTarget.value = null
@@ -213,6 +240,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
         // Temporary pause keeps the floating control available for Resume, but
         // performs no ride analysis and dispatches no gesture.
         if (!automationEnabled) {
+            cancelTransientWork()
             stateMachine.reset()
             lastRequestsAutomationAt = 0L
             _activeTarget.value = null
@@ -502,10 +530,14 @@ class RidePilotAccessibilityService : AccessibilityService() {
     private fun schedulePassiveRecheck(delayMs: Long) {
         if (!passiveRecheckScheduled.compareAndSet(false, true)) return
 
-        serviceScope.launch {
-            delay(delayMs)
-            passiveRecheckScheduled.set(false)
-            requestWindowProcessing()
+        passiveRecheckJob = serviceScope.launch {
+            try {
+                delay(delayMs)
+                requestWindowProcessing()
+            } finally {
+                passiveRecheckScheduled.set(false)
+                passiveRecheckJob = null
+            }
         }
     }
 
