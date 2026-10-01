@@ -37,6 +37,7 @@ class DataStoreManager(private val context: Context) {
         val NEGOTIATION_AUTO_COUNTER = booleanPreferencesKey("negotiation_auto_counter")
 
         val CONFIDENCE_THRESHOLD = intPreferencesKey("confidence_threshold")
+        val MAX_PICKUP_DISTANCE_KM = doublePreferencesKey("max_pickup_distance_km")
         val V3_AUTOMATION_DEFAULTS_APPLIED = booleanPreferencesKey("v3_automation_defaults_applied")
     }
 
@@ -73,6 +74,10 @@ class DataStoreManager(private val context: Context) {
 
     val confidenceThreshold: Flow<Int> = context.dataStore.data.map {
         it[PreferencesKeys.CONFIDENCE_THRESHOLD] ?: 70
+    }
+
+    val maxPickupDistanceKm: Flow<Double> = context.dataStore.data.map {
+        it[PreferencesKeys.MAX_PICKUP_DISTANCE_KM] ?: 5.0
     }
 
     val negotiationConfig: Flow<NegotiationConfig> = context.dataStore.data.map {
@@ -188,6 +193,12 @@ class DataStoreManager(private val context: Context) {
 
     suspend fun setConfidenceThreshold(threshold: Int) {
         context.dataStore.edit { it[PreferencesKeys.CONFIDENCE_THRESHOLD] = threshold }
+    }
+
+    suspend fun setMaxPickupDistanceKm(distanceKm: Double) {
+        context.dataStore.edit {
+            it[PreferencesKeys.MAX_PICKUP_DISTANCE_KM] = distanceKm.coerceIn(0.5, 30.0)
+        }
     }
 
     suspend fun applyV3AutomationDefaultsOnce() {
