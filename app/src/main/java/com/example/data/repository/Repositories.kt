@@ -45,6 +45,7 @@ class SettingsRepository(private val dataStoreManager: DataStoreManager) {
     val zoneVerificationMode: Flow<ZoneVerificationMode> = dataStoreManager.zoneVerificationMode
     val swipeDirection: Flow<SwipeDirection> = dataStoreManager.swipeDirection
     val confidenceThreshold: Flow<Int> = dataStoreManager.confidenceThreshold
+    val maxPickupDistanceKm: Flow<Double> = dataStoreManager.maxPickupDistanceKm
     val negotiationConfig: Flow<NegotiationConfig> = dataStoreManager.negotiationConfig
 
     suspend fun setAutomationEnabled(enabled: Boolean) = dataStoreManager.setAutomationEnabled(enabled)
@@ -59,6 +60,7 @@ class SettingsRepository(private val dataStoreManager: DataStoreManager) {
     suspend fun setZoneVerificationMode(mode: ZoneVerificationMode) = dataStoreManager.setZoneVerificationMode(mode)
     suspend fun setSwipeDirection(dir: SwipeDirection) = dataStoreManager.setSwipeDirection(dir)
     suspend fun setConfidenceThreshold(threshold: Int) = dataStoreManager.setConfidenceThreshold(threshold)
+    suspend fun setMaxPickupDistanceKm(distanceKm: Double) = dataStoreManager.setMaxPickupDistanceKm(distanceKm)
     suspend fun applyV3AutomationDefaultsOnce() = dataStoreManager.applyV3AutomationDefaultsOnce()
     suspend fun updateNegotiationConfig(config: NegotiationConfig) = dataStoreManager.updateNegotiationConfig(config)
 }
