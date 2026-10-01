@@ -1,15 +1,11 @@
 package com.example.domain.engine
 
 import android.content.Context
-import android.location.Address
-import android.location.Geocoder
 import com.example.data.model.LatLngPoint
 import com.example.data.model.WorkZone
 import com.example.data.model.ZoneVerificationMode
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import org.locationtech.jts.geom.Coordinate
@@ -20,7 +16,6 @@ import org.locationtech.jts.geom.MultiPolygon
 import org.locationtech.jts.geom.Polygon
 import org.locationtech.jts.operation.union.UnaryUnionOp
 import org.locationtech.jts.simplify.TopologyPreservingSimplifier
-import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 object ZoneEngine {
@@ -266,42 +261,15 @@ object ZoneEngine {
 
         addressCache[cleanKey]?.let { return it }
 
-        return withContext(Dispatchers.IO) {
-            try {
-                val geocoder = Geocoder(context, Locale("ar", "EG"))
+        val result = InDriveRoutePreviewResolver.resolveAddress(
+            context = context,
+            address = cleanKey
+        )
 
-                val queries = listOf(
-                    cleanKey,
-                    "$cleanKey, Alexandria, Egypt",
-                    "$cleanKey, الإسكندرية, مصر"
-                ).distinct()
-
-                var result: LatLngPoint? = null
-
-                for (query in queries) {
-                    @Suppress("DEPRECATION")
-                    val addresses = geocoder.getFromLocationName(query, 3) ?: emptyList()
-
-                    val alexandriaMatch = addresses.firstOrNull { address ->
-                        address.latitude in AlexandriaZoneCatalog.alexandriaSouth..AlexandriaZoneCatalog.alexandriaNorth &&
-                            address.longitude in AlexandriaZoneCatalog.alexandriaWest..AlexandriaZoneCatalog.alexandriaEast
-                    }
-
-                    val chosen = alexandriaMatch ?: addresses.firstOrNull()
-                    if (chosen != null) {
-                        result = LatLngPoint(chosen.latitude, chosen.longitude)
-                        break
-                    }
-                }
-
-                if (result != null) {
-                    addressCache[cleanKey] = result
-                }
-                result
-            } catch (_: Exception) {
-                null
-            }
+        if (result != null) {
+            addressCache[cleanKey] = result
         }
+        return result
     }
 
     /**
@@ -356,13 +324,11 @@ object ZoneEngine {
             pickupDeferred.await() to destinationDeferred.await()
         }
 
-        // A failed geocode must not be treated as "outside the zone".
-        // Keyword fallback is considered authoritative only when every active zone
-        // has configured keywords for the required address.
-        val pickupConclusive = pickupPoint != null ||
-            (!pickupAddress.isNullOrBlank() && enabledZones.all { it.allowedKeywords.isNotBlank() })
-        val destinationConclusive = destPoint != null ||
-            (!destinationAddress.isNullOrBlank() && enabledZones.all { it.allowedKeywords.isNotBlank() })
+        // A failed geocode is UNKNOWN, never OUTSIDE. Keyword matches were already
+        // accepted above as a positive fast-path, but a keyword miss is not proof
+        // that the address lies outside the polygon.
+        val pickupConclusive = pickupPoint != null
+        val destinationConclusive = destPoint != null
 
         val requiredDataConclusive = when (mode) {
             ZoneVerificationMode.PICKUP_ONLY -> pickupConclusive
