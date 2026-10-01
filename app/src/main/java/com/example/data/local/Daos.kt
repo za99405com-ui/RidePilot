@@ -20,6 +20,9 @@ interface PricingBandDao {
     @Query("SELECT * FROM pricing_bands WHERE appTarget = :appTarget ORDER BY minKm ASC")
     suspend fun getBandsForAppDirect(appTarget: AppTarget): List<PricingBand>
 
+    @Query("SELECT * FROM pricing_bands ORDER BY appTarget, minKm ASC")
+    suspend fun getAllBandsDirect(): List<PricingBand>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertBand(band: PricingBand): Long
 
@@ -44,8 +47,14 @@ interface WorkZoneDao {
     @Query("SELECT * FROM work_zones WHERE isEnabled = 1")
     suspend fun getEnabledZones(): List<WorkZone>
 
+    @Query("SELECT * FROM work_zones ORDER BY id ASC")
+    suspend fun getAllZonesDirect(): List<WorkZone>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertZone(zone: WorkZone): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertZones(zones: List<WorkZone>)
 
     @Update
     suspend fun updateZone(zone: WorkZone)
@@ -55,6 +64,9 @@ interface WorkZoneDao {
 
     @Query("DELETE FROM work_zones WHERE id = :id")
     suspend fun deleteZoneById(id: Long)
+
+    @Query("DELETE FROM work_zones")
+    suspend fun clearAllZones()
 }
 
 @Dao
