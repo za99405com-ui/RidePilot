@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -13,6 +15,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -31,14 +35,19 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.example.RidePilotApplication
+import com.example.data.backup.RidePilotBackupManager
 import com.example.data.model.PricingDistanceMode
 import com.example.data.model.SwipeDirection
 import com.example.data.model.ZoneVerificationMode
@@ -50,6 +59,9 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -57,7 +69,44 @@ fun AdvancedSettingsScreen(
     navController: NavController
 ) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val app = RidePilotApplication.instance
+    var backupStatus by remember { mutableStateOf<String?>(null) }
+
+    val exportBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                backupStatus = "جار حفظ النسخة…"
+                val result = RidePilotBackupManager.exportToUri(context, uri)
+                backupStatus = if (result.isSuccess) {
+                    "تم حفظ نسخة كاملة بنجاح"
+                } else {
+                    "فشل حفظ النسخة: ${result.exceptionOrNull()?.message ?: "خطأ غير معروف"}"
+                }
+            }
+        }
+    }
+
+    val importBackupLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                backupStatus = "جار استعادة النسخة…"
+                val result = RidePilotBackupManager.restoreFromUri(context, uri)
+                backupStatus = result.fold(
+                    onSuccess = {
+                        "تمت الاستعادة: ${it.zones} Zone و ${it.pricingBands} شريحة تسعير"
+                    },
+                    onFailure = {
+                        "فشلت الاستعادة: ${it.message ?: "ملف غير صالح"}"
+                    }
+                )
+            }
+        }
+    }
 
     val distanceMode by app.settingsRepository.pricingDistanceMode.collectAsState(initial = PricingDistanceMode.PICKUP_PLUS_TRIP)
     val zoneMode by app.settingsRepository.zoneVerificationMode.collectAsState(initial = ZoneVerificationMode.BOTH_PICKUP_AND_DESTINATION)
@@ -88,6 +137,95 @@ fun AdvancedSettingsScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp),
             contentPadding = PaddingValues(bottom = 32.dp)
         ) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = DarkCard),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "النسخ الاحتياطي والاستعادة",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "مكان واحد لحفظ واسترجاع الخريطة والـZones والتسعير والتفاوض وكل إعدادات RidePilot المهمة.",
+                            fontSize = 11.sp,
+                            color = TextSecondary,
+                            modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
+                        )
+
+                        Button(
+                            onClick = {
+                                val stamp = SimpleDateFormat(
+                                    "yyyy-MM-dd_HH-mm",
+                                    Locale.US
+                                ).format(Date())
+                                exportBackupLauncher.launch(
+                                    "RidePilot_Backup_${stamp}.json"
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = EmeraldPrimary
+                            )
+                        ) {
+                            Text(
+                                "حفظ نسخة كاملة",
+                                color = DarkBackground,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Button(
+                            onClick = {
+                                importBackupLauncher.launch(
+                                    arrayOf(
+                                        "application/json",
+                                        "text/plain",
+                                        "application/octet-stream"
+                                    )
+                                )
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AmberAccent
+                            )
+                        ) {
+                            Text(
+                                "استعادة / تركيب نسخة",
+                                color = DarkBackground,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        backupStatus?.let { status ->
+                            Spacer(modifier = Modifier.height(10.dp))
+                            Text(
+                                text = status,
+                                fontSize = 11.sp,
+                                color = if (status.startsWith("تم")) {
+                                    EmeraldPrimary
+                                } else {
+                                    TextSecondary
+                                }
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "الاستعادة لا تشغّل الأتمتة تلقائيًا. بعد الاستعادة راجع الإعدادات واضغط استئناف بنفسك.",
+                            fontSize = 10.sp,
+                            color = TextMuted
+                        )
+                    }
+                }
+            }
+
             // Pricing Distance Mode
             item {
                 Card(
