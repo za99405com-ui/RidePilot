@@ -22,7 +22,19 @@ object ZoneEngine {
 
     // Cache successful resolutions only. A failed lookup is allowed to retry
     // because inDrive sometimes exposes a partial address on the first read.
+    private const val MAX_ADDRESS_CACHE_ENTRIES = 256
     private val addressCache = ConcurrentHashMap<String, LatLngPoint>()
+
+    fun clearRuntimeCache() {
+        addressCache.clear()
+    }
+
+    private fun cacheAddress(key: String, point: LatLngPoint) {
+        if (addressCache.size >= MAX_ADDRESS_CACHE_ENTRIES) {
+            addressCache.clear()
+        }
+        addressCache[key] = point
+    }
 
     data class ZoneCheckResult(
         val isAllowed: Boolean,
@@ -267,7 +279,7 @@ object ZoneEngine {
         )
 
         if (result != null) {
-            addressCache[cleanKey] = result
+            cacheAddress(cleanKey, result)
         }
         return result
     }
