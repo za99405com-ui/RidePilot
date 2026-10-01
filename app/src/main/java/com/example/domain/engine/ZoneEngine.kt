@@ -1,29 +1,84 @@
 package com.example.domain.engine
 
 import android.content.Context
-import android.location.Address
-import android.location.Geocoder
 import com.example.data.model.LatLngPoint
 import com.example.data.model.WorkZone
 import com.example.data.model.ZoneVerificationMode
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import org.json.JSONArray
-import java.util.Locale
+import org.json.JSONObject
+import org.locationtech.jts.geom.Coordinate
+import org.locationtech.jts.geom.Geometry
+import org.locationtech.jts.geom.GeometryCollection
+import org.locationtech.jts.geom.GeometryFactory
+import org.locationtech.jts.geom.MultiPolygon
+import org.locationtech.jts.geom.Polygon
+import org.locationtech.jts.operation.union.UnaryUnionOp
+import org.locationtech.jts.simplify.TopologyPreservingSimplifier
 import java.util.concurrent.ConcurrentHashMap
 
 object ZoneEngine {
 
-    // In-memory cache for address string -> LatLng to minimize network/geocoder calls
-    private val addressCache = ConcurrentHashMap<String, LatLngPoint?>()
+    // Cache successful resolutions only. A failed lookup is allowed to retry
+    // because inDrive sometimes exposes a partial address on the first read.
+    private const val MAX_ADDRESS_CACHE_ENTRIES = 256
+    private val addressCache = ConcurrentHashMap<String, LatLngPoint>()
+
+    fun clearRuntimeCache() {
+        addressCache.clear()
+    }
+
+    private fun cacheAddress(key: String, point: LatLngPoint) {
+        if (addressCache.size >= MAX_ADDRESS_CACHE_ENTRIES) {
+            addressCache.clear()
+        }
+        addressCache[key] = point
+    }
 
     data class ZoneCheckResult(
         val isAllowed: Boolean,
         val matchedZone: WorkZone?,
         val pickupInside: Boolean,
         val destinationInside: Boolean,
-        val reason: String
+        val reason: String,
+        val isConclusive: Boolean = true
     )
+
+    /**
+     * Creates an approximately circular polygon around a center point.
+     *
+     * The stored WorkZone format is polygon-based, so automatic zones can use this
+     * without a database migration. Radius is expressed in kilometers.
+     */
+    fun createCirclePolygon(
+        center: LatLngPoint,
+        radiusKm: Double,
+        segments: Int = 48
+    ): List<LatLngPoint> {
+        val safeRadius = radiusKm.coerceAtLeast(0.1)
+        val safeSegments = segments.coerceIn(12, 120)
+        val earthRadiusKm = 6371.0088
+        val angularDistance = safeRadius / earthRadiusKm
+        val lat1 = Math.toRadians(center.latitude)
+        val lon1 = Math.toRadians(center.longitude)
+
+        return (0 until safeSegments).map { index ->
+            val bearing = 2.0 * Math.PI * index / safeSegments
+            val lat2 = kotlin.math.asin(
+                kotlin.math.sin(lat1) * kotlin.math.cos(angularDistance) +
+                    kotlin.math.cos(lat1) * kotlin.math.sin(angularDistance) * kotlin.math.cos(bearing)
+            )
+            val lon2 = lon1 + kotlin.math.atan2(
+                kotlin.math.sin(bearing) * kotlin.math.sin(angularDistance) * kotlin.math.cos(lat1),
+                kotlin.math.cos(angularDistance) - kotlin.math.sin(lat1) * kotlin.math.sin(lat2)
+            )
+            LatLngPoint(
+                latitude = Math.toDegrees(lat2),
+                longitude = Math.toDegrees(lon2)
+            )
+        }
+    }
 
     /**
      * Checks if a point (lat, lng) lies inside a polygon using the Ray-Casting algorithm.
@@ -52,22 +107,151 @@ object ZoneEngine {
     }
 
     /**
-     * Parse polygon points from JSON string.
+     * Parses both the legacy single-polygon JSON and the newer multi-polygon JSON.
+     *
+     * Legacy:
+     *   [ {lat/lng...}, {lat/lng...} ]
+     *
+     * Multi:
+     *   [ [ {lat/lng...}, ... ], [ {lat/lng...}, ... ] ]
      */
-    fun parsePolygonJson(json: String): List<LatLngPoint> {
+    fun parsePolygonGroups(json: String): List<List<LatLngPoint>> {
+        return try {
+            val root = JSONArray(json)
+            if (root.length() == 0) return emptyList()
+
+            val first = root.opt(0)
+            if (first is JSONObject) {
+                listOf(parsePointArray(root))
+            } else {
+                buildList {
+                    for (i in 0 until root.length()) {
+                        val group = root.optJSONArray(i) ?: continue
+                        val points = parsePointArray(group)
+                        if (points.size >= 3) add(points)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun parsePolygonJson(json: String): List<LatLngPoint> =
+        parsePolygonGroups(json).firstOrNull().orEmpty()
+
+    fun serializePolygonGroups(groups: List<List<LatLngPoint>>): String {
+        val cleanGroups = groups.filter { it.size >= 3 }
+        if (cleanGroups.size == 1) {
+            return pointArrayToJson(cleanGroups.first()).toString()
+        }
+
+        val root = JSONArray()
+        cleanGroups.forEach { root.put(pointArrayToJson(it)) }
+        return root.toString()
+    }
+
+    fun isPointInPolygonGroups(
+        point: LatLngPoint,
+        groups: List<List<LatLngPoint>>
+    ): Boolean = groups.any { it.size >= 3 && isPointInPolygon(point, it) }
+
+    /**
+     * Geometric union used by the UI's "دمج" action.
+     * Adjacent/overlapping areas become one outline. Truly separated areas remain
+     * multiple polygon parts but are still stored as one WorkZone.
+     */
+    fun mergePolygonGroups(groups: List<List<LatLngPoint>>): List<List<LatLngPoint>> {
+        val geometryFactory = GeometryFactory()
+        val polygons = groups.mapNotNull { points ->
+            if (points.size < 3) return@mapNotNull null
+
+            val coordinates = points.map {
+                Coordinate(it.longitude, it.latitude)
+            }.toMutableList()
+
+            if (
+                coordinates.first().x != coordinates.last().x ||
+                coordinates.first().y != coordinates.last().y
+            ) {
+                coordinates.add(Coordinate(coordinates.first()))
+            }
+
+            try {
+                geometryFactory.createPolygon(coordinates.toTypedArray()).let { polygon ->
+                    if (polygon.isValid) polygon else polygon.buffer(0.0)
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        if (polygons.isEmpty()) return emptyList()
+
+        return try {
+            val unioned = UnaryUnionOp.union(polygons)
+            val simplified = TopologyPreservingSimplifier.simplify(unioned, 0.00003)
+            geometryToPolygonGroups(simplified)
+        } catch (_: Exception) {
+            groups
+        }
+    }
+
+    private fun parsePointArray(arr: JSONArray): List<LatLngPoint> {
         val points = mutableListOf<LatLngPoint>()
-        try {
-            val arr = JSONArray(json)
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val lat = obj.optDouble("latitude", obj.optDouble("lat", 0.0))
-                val lng = obj.optDouble("longitude", obj.optDouble("lng", 0.0))
+        for (i in 0 until arr.length()) {
+            val obj = arr.optJSONObject(i) ?: continue
+            val lat = obj.optDouble("latitude", obj.optDouble("lat", Double.NaN))
+            val lng = obj.optDouble("longitude", obj.optDouble("lng", Double.NaN))
+            if (!lat.isNaN() && !lng.isNaN()) {
                 points.add(LatLngPoint(lat, lng))
             }
-        } catch (e: Exception) {
-            // fallback empty
         }
         return points
+    }
+
+    private fun pointArrayToJson(points: List<LatLngPoint>): JSONArray {
+        val arr = JSONArray()
+        points.forEach { point ->
+            arr.put(
+                JSONObject()
+                    .put("latitude", point.latitude)
+                    .put("longitude", point.longitude)
+            )
+        }
+        return arr
+    }
+
+    private fun geometryToPolygonGroups(geometry: Geometry): List<List<LatLngPoint>> {
+        val result = mutableListOf<List<LatLngPoint>>()
+
+        fun addPolygon(polygon: Polygon) {
+            val coords = polygon.exteriorRing.coordinates
+            if (coords.size < 4) return
+
+            val points = coords
+                .dropLast(1)
+                .map { LatLngPoint(it.y, it.x) }
+
+            if (points.size >= 3) result.add(points)
+        }
+
+        when (geometry) {
+            is Polygon -> addPolygon(geometry)
+            is MultiPolygon -> {
+                for (i in 0 until geometry.numGeometries) {
+                    val polygon = geometry.getGeometryN(i) as? Polygon ?: continue
+                    addPolygon(polygon)
+                }
+            }
+            is GeometryCollection -> {
+                for (i in 0 until geometry.numGeometries) {
+                    result.addAll(geometryToPolygonGroups(geometry.getGeometryN(i)))
+                }
+            }
+        }
+
+        return result
     }
 
     /**
@@ -87,26 +271,17 @@ object ZoneEngine {
         if (addressText.isNullOrBlank()) return null
         val cleanKey = addressText.trim().replace("\\s+".toRegex(), " ")
 
-        if (addressCache.containsKey(cleanKey)) {
-            return addressCache[cleanKey]
-        }
+        addressCache[cleanKey]?.let { return it }
 
-        return withContext(Dispatchers.IO) {
-            try {
-                val geocoder = Geocoder(context, Locale("ar", "EG"))
-                @Suppress("DEPRECATION")
-                val addresses = geocoder.getFromLocationName(cleanKey, 1) ?: emptyList()
-                val result = if (addresses.isNotEmpty()) {
-                    LatLngPoint(addresses[0].latitude, addresses[0].longitude)
-                } else null
+        val result = InDriveRoutePreviewResolver.resolveAddress(
+            context = context,
+            address = cleanKey
+        )
 
-                addressCache[cleanKey] = result
-                result
-            } catch (e: Exception) {
-                addressCache[cleanKey] = null
-                null
-            }
+        if (result != null) {
+            cacheAddress(cleanKey, result)
         }
+        return result
     }
 
     /**
@@ -131,20 +306,61 @@ object ZoneEngine {
             )
         }
 
-        val pickupPoint = geocodeAddress(context, pickupAddress)
-        val destPoint = geocodeAddress(context, destinationAddress)
-
-        // Check each zone
+        // Fast path: explicit zone keywords can often decide the ride immediately
+        // without waiting for Android Geocoder.
         for (zone in enabledZones) {
-            val polygon = parsePolygonJson(zone.polygonJson)
+            if (zone.allowedKeywords.isBlank()) continue
+            val pickupKeywordOk = matchesKeywords(pickupAddress, zone)
+            val destinationKeywordOk = matchesKeywords(destinationAddress, zone)
+            val allowedByKeywords = when (mode) {
+                ZoneVerificationMode.PICKUP_ONLY -> pickupKeywordOk
+                ZoneVerificationMode.DESTINATION_ONLY -> destinationKeywordOk
+                ZoneVerificationMode.BOTH_PICKUP_AND_DESTINATION -> pickupKeywordOk && destinationKeywordOk
+            }
+            if (allowedByKeywords) {
+                return ZoneCheckResult(
+                    isAllowed = true,
+                    matchedZone = zone,
+                    pickupInside = pickupKeywordOk,
+                    destinationInside = destinationKeywordOk,
+                    reason = "✅ داخل منطقة [${zone.name}] حسب الكلمات المفتاحية"
+                )
+            }
+        }
+
+        // Resolve pickup and destination in parallel; sequential geocoding doubled
+        // the response time on first-seen addresses.
+        val (pickupPoint, destPoint) = coroutineScope {
+            val pickupDeferred = async { geocodeAddress(context, pickupAddress) }
+            val destinationDeferred = async { geocodeAddress(context, destinationAddress) }
+            pickupDeferred.await() to destinationDeferred.await()
+        }
+
+        // A failed geocode is UNKNOWN, never OUTSIDE. Keyword matches were already
+        // accepted above as a positive fast-path, but a keyword miss is not proof
+        // that the address lies outside the polygon.
+        val pickupConclusive = pickupPoint != null
+        val destinationConclusive = destPoint != null
+
+        val requiredDataConclusive = when (mode) {
+            ZoneVerificationMode.PICKUP_ONLY -> pickupConclusive
+            ZoneVerificationMode.DESTINATION_ONLY -> destinationConclusive
+            ZoneVerificationMode.BOTH_PICKUP_AND_DESTINATION -> pickupConclusive && destinationConclusive
+        }
+
+        // Check each zone. One WorkZone may contain multiple merged polygon parts.
+        for (zone in enabledZones) {
+            val polygonGroups = parsePolygonGroups(zone.polygonJson)
 
             val pickupOk = when {
-                pickupPoint != null && polygon.size >= 3 -> isPointInPolygon(pickupPoint, polygon)
+                pickupPoint != null && polygonGroups.isNotEmpty() ->
+                    isPointInPolygonGroups(pickupPoint, polygonGroups)
                 else -> matchesKeywords(pickupAddress, zone)
             }
 
             val destOk = when {
-                destPoint != null && polygon.size >= 3 -> isPointInPolygon(destPoint, polygon)
+                destPoint != null && polygonGroups.isNotEmpty() ->
+                    isPointInPolygonGroups(destPoint, polygonGroups)
                 else -> matchesKeywords(destinationAddress, zone)
             }
 
@@ -170,6 +386,17 @@ object ZoneEngine {
             }
         }
 
+        if (!requiredDataConclusive) {
+            return ZoneCheckResult(
+                isAllowed = false,
+                matchedZone = null,
+                pickupInside = false,
+                destinationInside = false,
+                reason = "⚠️ تعذر التحقق من الـZone بشكل موثوق (عنوان أو Geocoding غير متاح)",
+                isConclusive = false
+            )
+        }
+
         val failReason = when (mode) {
             ZoneVerificationMode.PICKUP_ONLY -> "❌ نقطة الركوب خارج مناطق العمل المفعلة"
             ZoneVerificationMode.DESTINATION_ONLY -> "❌ الوجهة خارج مناطق العمل المفعلة"
@@ -181,7 +408,8 @@ object ZoneEngine {
             matchedZone = null,
             pickupInside = false,
             destinationInside = false,
-            reason = failReason
+            reason = failReason,
+            isConclusive = true
         )
     }
 }

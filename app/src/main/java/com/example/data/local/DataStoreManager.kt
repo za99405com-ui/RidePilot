@@ -37,6 +37,8 @@ class DataStoreManager(private val context: Context) {
         val NEGOTIATION_AUTO_COUNTER = booleanPreferencesKey("negotiation_auto_counter")
 
         val CONFIDENCE_THRESHOLD = intPreferencesKey("confidence_threshold")
+        val MAX_PICKUP_DISTANCE_KM = doublePreferencesKey("max_pickup_distance_km")
+        val V3_AUTOMATION_DEFAULTS_APPLIED = booleanPreferencesKey("v3_automation_defaults_applied")
     }
 
     val automationEnabled: Flow<Boolean> = context.dataStore.data.map {
@@ -74,32 +76,103 @@ class DataStoreManager(private val context: Context) {
         it[PreferencesKeys.CONFIDENCE_THRESHOLD] ?: 70
     }
 
+    val maxPickupDistanceKm: Flow<Double> = context.dataStore.data.map {
+        it[PreferencesKeys.MAX_PICKUP_DISTANCE_KM] ?: 5.0
+    }
+
     val negotiationConfig: Flow<NegotiationConfig> = context.dataStore.data.map {
         NegotiationConfig(
             startMarginEgp = it[PreferencesKeys.NEGOTIATION_START_MARGIN] ?: 15.0,
             negotiationStepEgp = it[PreferencesKeys.NEGOTIATION_STEP] ?: 5.0,
             maxNegotiationAttempts = it[PreferencesKeys.NEGOTIATION_MAX_ATTEMPTS] ?: 3,
             roundToEgp = it[PreferencesKeys.NEGOTIATION_ROUND_TO] ?: 5.0,
-            autoAccept = it[PreferencesKeys.NEGOTIATION_AUTO_ACCEPT] ?: false,
+            autoAccept = it[PreferencesKeys.NEGOTIATION_AUTO_ACCEPT] ?: true,
             autoCounterOffer = it[PreferencesKeys.NEGOTIATION_AUTO_COUNTER] ?: true
         )
     }
 
+    /**
+     * Low-level automation toggle. A hard-stopped session cannot be re-enabled
+     * through this method; only startAutomationFromApp() may clear HARD STOP.
+     */
     suspend fun setAutomationEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.AUTOMATION_ENABLED] = enabled }
-    }
-
-    suspend fun setEmergencyStop(stopped: Boolean) {
-        context.dataStore.edit {
-            it[PreferencesKeys.EMERGENCY_STOP] = stopped
-            if (stopped) {
-                it[PreferencesKeys.AUTOMATION_ENABLED] = false
+        context.dataStore.edit { prefs ->
+            if (enabled && prefs[PreferencesKeys.EMERGENCY_STOP] == true) {
+                prefs[PreferencesKeys.AUTOMATION_ENABLED] = false
+            } else {
+                prefs[PreferencesKeys.AUTOMATION_ENABLED] = enabled
             }
         }
     }
 
+    suspend fun setEmergencyStop(stopped: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.EMERGENCY_STOP] = stopped
+            if (stopped) {
+                prefs[PreferencesKeys.AUTOMATION_ENABLED] = false
+                prefs[PreferencesKeys.OVERLAY_ENABLED] = false
+            }
+        }
+    }
+
+    /**
+     * The only path that clears a hard stop and starts RidePilot again.
+     * This method is intentionally called from the RidePilot app UI, never
+     * from the floating overlay.
+     */
+    suspend fun startAutomationFromApp() {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.EMERGENCY_STOP] = false
+            prefs[PreferencesKeys.OVERLAY_ENABLED] = true
+            prefs[PreferencesKeys.AUTOMATION_ENABLED] = true
+        }
+    }
+
+    /**
+     * Temporary pause: keep the floating control available, but do not perform
+     * any ride automation until resumed.
+     */
+    suspend fun pauseAutomation() {
+        context.dataStore.edit { prefs ->
+            if (prefs[PreferencesKeys.EMERGENCY_STOP] != true) {
+                prefs[PreferencesKeys.AUTOMATION_ENABLED] = false
+                prefs[PreferencesKeys.OVERLAY_ENABLED] = true
+            }
+        }
+    }
+
+    /**
+     * Resume is allowed from the floating control only when HARD STOP is not set.
+     */
+    suspend fun resumeAutomationFromOverlay() {
+        context.dataStore.edit { prefs ->
+            if (prefs[PreferencesKeys.EMERGENCY_STOP] != true) {
+                prefs[PreferencesKeys.OVERLAY_ENABLED] = true
+                prefs[PreferencesKeys.AUTOMATION_ENABLED] = true
+            }
+        }
+    }
+
+    /**
+     * Full STOP. The overlay is disabled too, so Accessibility events cannot
+     * resurrect it. Restart requires startAutomationFromApp().
+     */
+    suspend fun hardStop() {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.EMERGENCY_STOP] = true
+            prefs[PreferencesKeys.AUTOMATION_ENABLED] = false
+            prefs[PreferencesKeys.OVERLAY_ENABLED] = false
+        }
+    }
+
     suspend fun setOverlayEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.OVERLAY_ENABLED] = enabled }
+        context.dataStore.edit { prefs ->
+            if (enabled && prefs[PreferencesKeys.EMERGENCY_STOP] == true) {
+                prefs[PreferencesKeys.OVERLAY_ENABLED] = false
+            } else {
+                prefs[PreferencesKeys.OVERLAY_ENABLED] = enabled
+            }
+        }
     }
 
     suspend fun setOcrFallbackEnabled(enabled: Boolean) {
@@ -120,6 +193,22 @@ class DataStoreManager(private val context: Context) {
 
     suspend fun setConfidenceThreshold(threshold: Int) {
         context.dataStore.edit { it[PreferencesKeys.CONFIDENCE_THRESHOLD] = threshold }
+    }
+
+    suspend fun setMaxPickupDistanceKm(distanceKm: Double) {
+        context.dataStore.edit {
+            it[PreferencesKeys.MAX_PICKUP_DISTANCE_KM] = distanceKm.coerceIn(0.5, 30.0)
+        }
+    }
+
+    suspend fun applyV3AutomationDefaultsOnce() {
+        context.dataStore.edit { prefs ->
+            if (prefs[PreferencesKeys.V3_AUTOMATION_DEFAULTS_APPLIED] != true) {
+                prefs[PreferencesKeys.NEGOTIATION_AUTO_ACCEPT] = true
+                prefs[PreferencesKeys.NEGOTIATION_AUTO_COUNTER] = true
+                prefs[PreferencesKeys.V3_AUTOMATION_DEFAULTS_APPLIED] = true
+            }
+        }
     }
 
     suspend fun updateNegotiationConfig(config: NegotiationConfig) {

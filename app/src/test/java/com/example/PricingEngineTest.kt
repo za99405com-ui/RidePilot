@@ -57,6 +57,13 @@ class PricingEngineTest {
     }
 
     @Test
+    fun testNoBandsIsInvalidInsteadOfInventingDefaultPrice() {
+        val result = PricingEngine.calculateMinimumPrice(12.0, emptyList())
+        assertTrue(!result.isValid)
+        assertEquals(0.0, result.minimumPrice, 0.01)
+    }
+
+    @Test
     fun testDistanceBeyondMaxBand() {
         // 35 km -> exceeds 30km, uses highest band rate (6 EGP/km)
         val result = PricingEngine.calculateMinimumPrice(35.0, sampleBands)

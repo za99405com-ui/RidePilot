@@ -36,16 +36,13 @@ object PricingEngine {
         }
 
         if (bands.isEmpty()) {
-            // Default safe baseline if user configured no bands
-            val defaultRate = 8.0
-            val minPrice = roundToTwoDecimals(distanceKm * defaultRate)
             return CalculationResult(
                 distanceKm = distanceKm,
                 matchedBand = null,
-                pricePerKm = defaultRate,
-                minimumPrice = minPrice,
-                isValid = true,
-                explanation = "لا توجد شرائح محددة، تم استخدام السعر الافتراضي 8 ج.م/كم"
+                pricePerKm = 0.0,
+                minimumPrice = 0.0,
+                isValid = false,
+                explanation = "لا توجد شرائح تسعير مفعلة؛ لن يتم اتخاذ أي إجراء تلقائي"
             )
         }
 

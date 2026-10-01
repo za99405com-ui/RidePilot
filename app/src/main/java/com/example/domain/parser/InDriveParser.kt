@@ -32,6 +32,8 @@ object InDriveParser {
         val activeOffer: RideOffer?,
         val quickOfferButtons: Map<Double, Rect>,
         val customOfferEditButtonBounds: Rect?,
+        val customOfferInputNode: AccessibilityNodeInfo?,
+        val customOfferInputText: String?,
         val submitOfferButtonBounds: Rect?,
         val closeButtonBounds: Rect?,
         val acceptButtonBounds: Rect?,
@@ -49,6 +51,8 @@ object InDriveParser {
                 activeOffer = null,
                 quickOfferButtons = emptyMap(),
                 customOfferEditButtonBounds = null,
+                customOfferInputNode = null,
+                customOfferInputText = null,
                 submitOfferButtonBounds = null,
                 closeButtonBounds = null,
                 acceptButtonBounds = null,
@@ -61,12 +65,15 @@ object InDriveParser {
         var offlineButtonBounds: Rect? = null
         var isRequestsList = false
         var isOrderDetails = false
-        var isCounterOfferInput = false
+        var hasCounterOfferPrompt = false
         var isWaitingResponse = false
         var isResponseRejected = false
 
         val quickOfferMap = mutableMapOf<Double, Rect>()
         var editButtonBounds: Rect? = null
+        val editIconCandidates = mutableListOf<Rect>()
+        var customOfferInputNode: AccessibilityNodeInfo? = null
+        var customOfferInputText: String? = null
         var submitButtonBounds: Rect? = null
         var closeButtonBounds: Rect? = null
         var acceptButtonBounds: Rect? = null
@@ -76,6 +83,11 @@ object InDriveParser {
         // Find offline / online status
         fun inspectNode(node: AccessibilityNodeInfo) {
             val text = (node.text?.toString() ?: node.contentDescription?.toString())?.trim() ?: ""
+
+            if (node.isEditable || node.className?.toString() == "android.widget.EditText") {
+                customOfferInputNode = node
+                customOfferInputText = text.ifBlank { null }
+            }
 
             if (text.contains("غير متصل")) {
                 isOffline = true
@@ -97,8 +109,11 @@ object InDriveParser {
                 isOrderDetails = true
             }
 
-            if (text.contains("اعرض الأجرة المناسبة لك")) {
-                isCounterOfferInput = true
+            if (text.contains("اعرض الأجرة المناسبة لك") || text.contains("اقترح أجرتك")) {
+                // This text is also present on the normal details screen above the
+                // quick-price chips. Do NOT classify the screen as a custom-input
+                // screen from this prompt alone.
+                hasCounterOfferPrompt = true
             }
 
             if (text.contains("جار عرض الأجرة المناسبة لك") || text.contains("انتظر الرد")) {
@@ -141,12 +156,23 @@ object InDriveParser {
                 }
             }
 
-            // Edit button (pencil)
-            if (node.isClickable && (text.contains("تعديل") || node.className == "android.widget.ImageButton" || node.className == "android.widget.ImageView")) {
+            // Explicit edit label or unlabeled image-button candidate. We choose the
+            // actual pencil after the whole tree is scanned, using the quick-offer row.
+            if (node.isClickable && text.contains("تعديل")) {
                 val rect = Rect()
                 node.getBoundsInScreen(rect)
-                if (rect.width() in 40..200 && rect.height() in 40..200 && rect.top > 800) {
+                if (rect.width() in 40..240 && rect.height() in 40..240) {
                     editButtonBounds = rect
+                }
+            } else if (
+                node.isClickable &&
+                (node.className?.toString() == "android.widget.ImageButton" ||
+                    node.className?.toString() == "android.widget.ImageView")
+            ) {
+                val rect = Rect()
+                node.getBoundsInScreen(rect)
+                if (rect.width() in 40..240 && rect.height() in 40..240) {
+                    editIconCandidates.add(rect)
                 }
             }
 
@@ -159,23 +185,70 @@ object InDriveParser {
 
         inspectNode(root)
 
+        // Detect request cards even when this inDrive build does not expose the
+        // "طلبات الركوب" heading through Accessibility. Previously this was
+        // circular: cards were parsed only after the screen had already been
+        // identified as REQUESTS_LIST.
+        extractOrderCardsFromList(root, orderCards)
+        if (orderCards.isNotEmpty()) {
+            isRequestsList = true
+        }
+
+        // The pencil sits on the same horizontal row as the quick-price chips.
+        // Pick the closest image button to that row instead of a random map/profile icon.
+        if (editButtonBounds == null && quickOfferMap.isNotEmpty() && editIconCandidates.isNotEmpty()) {
+            val chipCentersY = quickOfferMap.values.map { it.exactCenterY() }
+            val avgChipY = chipCentersY.average().toFloat()
+            editButtonBounds = editIconCandidates
+                .filter { kotlin.math.abs(it.exactCenterY() - avgChipY) <= 140f }
+                .minByOrNull { it.exactCenterX() }
+        }
+
+        // A custom-offer input screen is confirmed only when an editable field is
+        // actually present. The normal details screen contains the same prompt text.
+        val isCounterOfferInput =
+            customOfferInputNode != null &&
+                (submitButtonBounds != null || hasCounterOfferPrompt)
+
+        // Some inDrive versions do not expose the "طلب ركوب" heading. The accept
+        // button or quick-offer chips are enough to identify the details screen.
+        if (acceptButtonBounds != null || quickOfferMap.isNotEmpty()) {
+            isOrderDetails = true
+        }
+
         val screenType = when {
-            isCounterOfferInput -> InDriveScreenType.COUNTER_OFFER_INPUT
             isWaitingResponse -> InDriveScreenType.WAITING_RESPONSE
+            isCounterOfferInput -> InDriveScreenType.COUNTER_OFFER_INPUT
             isOrderDetails -> InDriveScreenType.ORDER_DETAILS
             isRequestsList -> InDriveScreenType.REQUESTS_LIST
             else -> InDriveScreenType.UNKNOWN
         }
 
-        // Parse order cards if in requests list
-        if (screenType == InDriveScreenType.REQUESTS_LIST) {
-            extractOrderCardsFromList(root, orderCards)
-        }
-
-        // Parse active order if in order details
+        // Parse active order if in order details.
+        // Some inDrive builds split the modal between map/header and bottom sheet.
+        // Parse the focused container first, then fall back to the full root only
+        // when important fields are missing. Pick the more complete result.
         var activeOffer: RideOffer? = null
-        if (screenType == InDriveScreenType.ORDER_DETAILS || screenType == InDriveScreenType.COUNTER_OFFER_INPUT) {
-            activeOffer = extractActiveOrderDetails(root)
+        if (
+            screenType == InDriveScreenType.ORDER_DETAILS ||
+            screenType == InDriveScreenType.COUNTER_OFFER_INPUT
+        ) {
+            val focusedRoot = findDetailsContainer(root)
+            val focusedOffer = extractActiveOrderDetails(focusedRoot ?: root)
+
+            val needsFallback =
+                focusedOffer == null ||
+                    focusedOffer.displayedPrice == null ||
+                    focusedOffer.tripDistanceKm == null ||
+                    focusedOffer.pickupAddress.isNullOrBlank() ||
+                    focusedOffer.destinationAddress.isNullOrBlank()
+
+            val fullOffer = if (needsFallback && focusedRoot !== root) {
+                extractActiveOrderDetails(root)
+            } else null
+
+            activeOffer = listOfNotNull(focusedOffer, fullOffer)
+                .maxByOrNull(::offerCompletenessScore)
         }
 
         var confidence = 50
@@ -191,6 +264,8 @@ object InDriveParser {
             activeOffer = activeOffer,
             quickOfferButtons = quickOfferMap,
             customOfferEditButtonBounds = editButtonBounds,
+            customOfferInputNode = customOfferInputNode,
+            customOfferInputText = customOfferInputText,
             submitOfferButtonBounds = submitButtonBounds,
             closeButtonBounds = closeButtonBounds,
             acceptButtonBounds = acceptButtonBounds,
@@ -200,48 +275,97 @@ object InDriveParser {
     }
 
     private fun extractOrderCardsFromList(root: AccessibilityNodeInfo, cardsOut: MutableList<InDriveOrderCard>) {
+        val candidates = mutableListOf<InDriveOrderCard>()
+
         fun scan(node: AccessibilityNodeInfo) {
             val rect = Rect()
             node.getBoundsInScreen(rect)
 
-            // Look for nodes that encapsulate an order: has price (EGP) and distance
-            val childTexts = mutableListOf<String>()
-            fun collectChildTexts(childNode: AccessibilityNodeInfo) {
-                val t = (childNode.text?.toString() ?: childNode.contentDescription?.toString())?.trim()
-                if (!t.isNullOrBlank()) childTexts.add(t)
-                for (j in 0 until childNode.childCount) {
-                    val c = childNode.getChild(j) ?: continue
-                    collectChildTexts(c)
-                }
-            }
+            // Some inDrive builds expose the visual card container as non-clickable
+            // while one of its ancestors handles the click. Detect by geometry/content
+            // first and let ClickNode climb the parent chain when needed.
+            val looksCardSized =
+                rect.width() > 500 &&
+                    rect.height() in 100..650 &&
+                    node.childCount in 1..20
 
-            if (node.isClickable && rect.height() in 100..600 && rect.width() > 500) {
+            if (looksCardSized) {
+                val childTexts = mutableListOf<String>()
+
+                fun collectChildTexts(childNode: AccessibilityNodeInfo) {
+                    val t = (
+                        childNode.text?.toString()
+                            ?: childNode.contentDescription?.toString()
+                        )?.trim()
+
+                    if (!t.isNullOrBlank()) childTexts.add(t)
+
+                    for (j in 0 until childNode.childCount) {
+                        val child = childNode.getChild(j) ?: continue
+                        collectChildTexts(child)
+                    }
+                }
+
                 collectChildTexts(node)
-                val priceText = childTexts.firstOrNull { it.contains("EGP") || it.contains("ج.م") }
-                val distText = childTexts.firstOrNull { it.contains("كلم") || it.contains("كم") || it.contains("متر") }
+
+                val priceText = childTexts.firstOrNull {
+                    it.contains("EGP", ignoreCase = true) ||
+                        it.contains("E£", ignoreCase = true) ||
+                        it.contains("ج.م") ||
+                        it.contains("جنيه")
+                }
+
+                val distText = childTexts.firstOrNull {
+                    it.contains("كلم") ||
+                        it.contains("كم") ||
+                        it.contains("km", ignoreCase = true) ||
+                        it.contains("متر")
+                }
 
                 if (priceText != null && distText != null) {
                     val price = ArabicNumberHelper.extractFirstDouble(priceText)
                     val dist = ArabicNumberHelper.extractDistanceKm(distText)
 
-                    // Pick addresses from remaining texts
-                    val addressCandidates = childTexts.filter {
-                        it != priceText && it != distText &&
-                        !it.contains("EGP") && !it.contains("سداد") && !it.contains("★") && it.length > 5
-                    }
-                    val pickup = addressCandidates.getOrNull(0)
-                    val dest = addressCandidates.getOrNull(1)
+                    if (price != null && price > 0.0 && dist != null && dist > 0.0) {
+                        val cleanTexts = childTexts
+                            .map { it.trim() }
+                            .distinct()
+                            .filter {
+                                it != priceText &&
+                                    it != distText &&
+                                    !it.contains("EGP", ignoreCase = true) &&
+                                    !it.contains("E£", ignoreCase = true) &&
+                                    !it.contains("ج.م") &&
+                                    !it.contains("سداد") &&
+                                    !it.contains("InstaPay", ignoreCase = true) &&
+                                    !it.contains("★") &&
+                                    !it.contains("دقيقة") &&
+                                    !it.contains("طلب ركوب") &&
+                                    !Regex("""^\(?\d+(?:[.,]\d+)?\)?$""").matches(
+                                        ArabicNumberHelper.normalizeDigits(it)
+                                    ) &&
+                                    it.length >= 8
+                            }
 
-                    cardsOut.add(
-                        InDriveOrderCard(
-                            priceEgp = price,
-                            distanceKm = dist,
-                            pickupAddress = pickup,
-                            destinationAddress = dest,
-                            bounds = rect,
-                            node = node
+                        val likelyAddresses = cleanTexts.filter {
+                            addressLikelihoodScore(it) >= 2
+                        }
+
+                        val addressCandidates =
+                            if (likelyAddresses.size >= 2) likelyAddresses
+                            else cleanTexts.filter { it.length >= 12 }
+
+                        candidates.add(
+                            InDriveOrderCard(
+                                priceEgp = price,
+                                distanceKm = dist,
+                                pickupAddress = addressCandidates.getOrNull(0),
+                                destinationAddress = addressCandidates.getOrNull(1),
+                                bounds = Rect(rect),
+                                node = node
+                            )
                         )
-                    )
+                    }
                 }
             }
 
@@ -252,6 +376,131 @@ object InDriveParser {
         }
 
         scan(root)
+
+        // Nested accessibility containers can describe the same visual request card.
+        // Keep the smallest container per visual row to avoid opening one order twice.
+        val unique = candidates
+            .sortedWith(
+                compareBy<InDriveOrderCard> { it.bounds.top }
+                    .thenBy { it.bounds.width() * it.bounds.height() }
+            )
+            .fold(mutableListOf<InDriveOrderCard>()) { acc, card ->
+                val duplicateIndex = acc.indexOfFirst { existing ->
+                    kotlin.math.abs(
+                        existing.bounds.exactCenterY() - card.bounds.exactCenterY()
+                    ) < 32f &&
+                        kotlin.math.abs(
+                            (existing.priceEgp ?: 0.0) - (card.priceEgp ?: 0.0)
+                        ) < 0.01
+                }
+
+                if (duplicateIndex < 0) {
+                    acc.add(card)
+                } else {
+                    val existing = acc[duplicateIndex]
+                    val existingArea = existing.bounds.width() * existing.bounds.height()
+                    val candidateArea = card.bounds.width() * card.bounds.height()
+                    if (candidateArea < existingArea) {
+                        acc[duplicateIndex] = card
+                    }
+                }
+                acc
+            }
+            .sortedBy { it.bounds.top }
+
+        cardsOut.addAll(unique)
+    }
+
+    private fun addressLikelihoodScore(text: String): Int {
+        var score = 0
+        if (text.length >= 18) score += 1
+        if (
+            text.contains("(") || text.contains(")") ||
+            text.contains(",") || text.contains("،")
+        ) score += 1
+
+        val locationHints = listOf(
+            "street", "road", "branch", "mosque", "central",
+            "sidi", "montaza", "smouha", "moharam", "alexandria",
+            "شارع", "طريق", "قسم", "فرع", "عزبة", "موقف", "مديرية",
+            "مسجد", "ميامي", "سيدي", "المنتزه", "سموحة", "محرم", "الإسكندرية"
+        )
+        if (locationHints.any { text.contains(it, ignoreCase = true) }) score += 2
+
+        return score
+    }
+
+    /**
+     * inDrive opens ride details as a modal above the requests list. The underlying
+     * list remains present in the Accessibility tree, so parsing the full root can
+     * mix list-card distances (e.g. 1.5 km / 2.2 km) into the active ride.
+     *
+     * Find the smallest large ancestor of the modal heading and parse only that
+     * subtree. If the layout changes, safely fall back to the full root.
+     */
+    private fun findDetailsContainer(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val rootRect = Rect()
+        root.getBoundsInScreen(rootRect)
+        if (rootRect.width() <= 0 || rootRect.height() <= 0) return null
+
+        var marker: AccessibilityNodeInfo? = null
+
+        fun scan(node: AccessibilityNodeInfo) {
+            if (marker != null) return
+            val text = (node.text?.toString() ?: node.contentDescription?.toString())
+                ?.trim()
+                .orEmpty()
+
+            val isHeading =
+                text == "طلب ركوب" ||
+                    text.equals("Ride request", ignoreCase = true)
+
+            if (isHeading) {
+                marker = node
+                return
+            }
+
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                scan(child)
+                if (marker != null) return
+            }
+        }
+
+        scan(root)
+        val start = marker ?: return null
+
+        var current: AccessibilityNodeInfo? = start
+        var best: AccessibilityNodeInfo? = null
+        var hops = 0
+
+        while (current != null && hops < 10) {
+            val rect = Rect()
+            current.getBoundsInScreen(rect)
+
+            val wideEnough = rect.width() >= (rootRect.width() * 0.72f)
+            val tallEnough = rect.height() >= (rootRect.height() * 0.45f)
+
+            if (wideEnough && tallEnough) {
+                best = current
+                break
+            }
+
+            current = current.parent
+            hops++
+        }
+
+        return best
+    }
+
+    private fun offerCompletenessScore(offer: RideOffer): Int {
+        var score = offer.confidence
+        if (offer.displayedPrice != null) score += 20
+        if (offer.pickupDistanceKm != null) score += 15
+        if (offer.tripDistanceKm != null) score += 25
+        if (!offer.pickupAddress.isNullOrBlank()) score += 15
+        if (!offer.destinationAddress.isNullOrBlank()) score += 15
+        return score
     }
 
     private fun extractActiveOrderDetails(root: AccessibilityNodeInfo): RideOffer? {
@@ -266,31 +515,109 @@ object InDriveParser {
         }
         collect(root)
 
-        val priceText = texts.firstOrNull { it.contains("EGP") || it.contains("E£") }
+        // Prefer the actual passenger fare shown in the accept button.
+        // Quick-offer chips also contain "EGP" and must not be mistaken for the fare.
+        val acceptPriceText = texts.firstOrNull {
+            it.contains("القبول مقابل") && (it.contains("EGP") || it.contains("E£") || it.contains("ج.م"))
+        }
+        val priceText = acceptPriceText ?: texts.firstOrNull {
+            (it.contains("EGP") || it.contains("E£") || it.contains("ج.م")) &&
+                !Regex("""^\s*\d+(?:[.,]\d+)?\s*EGP\s*$""", RegexOption.IGNORE_CASE)
+                    .matches(ArabicNumberHelper.normalizeDigits(it))
+        } ?: texts.firstOrNull { it.contains("EGP") || it.contains("E£") || it.contains("ج.م") }
         val price = ArabicNumberHelper.extractFirstDouble(priceText)
 
-        val distText = texts.firstOrNull { it.contains("كلم") || it.contains("كم") }
-        val dist = ArabicNumberHelper.extractDistanceKm(distText)
-
-        val timeText = texts.firstOrNull { it.contains("دقيقة") }
-        val time = ArabicNumberHelper.extractFirstDouble(timeText)?.toInt()
-
-        val addresses = texts.filter {
-            it != priceText && it != distText && it != timeText &&
-            !it.contains("طلب ركوب") && !it.contains("سداد") && !it.contains("★") && it.length > 6
+        val distanceTexts = texts.filter {
+            it.contains("كلم") || it.contains("كم") || it.contains("km", ignoreCase = true) || it.contains("متر")
         }
+        val distances = distanceTexts
+            .mapNotNull { ArabicNumberHelper.extractDistanceKm(it) }
+            .filter { it > 0.0 }
+            .distinctBy { (it * 1000.0).toInt() }
+
+        val timeTexts = texts.filter {
+            it.contains("دقيقة") || Regex("""\b\d+\s*د\b""").containsMatchIn(ArabicNumberHelper.normalizeDigits(it))
+        }
+        val times = timeTexts
+            .mapNotNull { ArabicNumberHelper.extractFirstDouble(it)?.toInt() }
+            .filter { it > 0 }
+            .distinct()
+
+        // Safety rule: inDrive details normally expose pickup distance first and trip
+        // distance second. Never treat a single distance as the trip distance because
+        // that value can belong to the pickup leg or to a partially rendered screen.
+        // Returning null forces the automation to wait instead of accepting a fare
+        // using the wrong (too small) distance.
+        val pickupDistance = distances.getOrNull(0)
+        val tripDistance = distances.getOrNull(1)
+        val pickupTime = times.getOrNull(0)
+        val tripTime = times.getOrNull(1)
+
+        val excluded = (distanceTexts + timeTexts + listOfNotNull(priceText)).toSet()
+
+        fun isAddressLike(text: String): Boolean {
+            if (text in excluded) return false
+            if (text.length < 6) return false
+            val blocked = listOf(
+                "طلب ركوب", "سداد", "تقديم عرض", "القبول مقابل", "اعرض الأجرة",
+                "اقترح أجرتك", "السعر العادل", "إغلاق", "حصري", "نقدي"
+            )
+            if (blocked.any { text.contains(it, ignoreCase = true) }) return false
+            if (text.contains("★")) return false
+            if (Regex("""^\s*\d+(?:[.,]\d+)?\s*EGP\s*$""", RegexOption.IGNORE_CASE)
+                    .matches(ArabicNumberHelper.normalizeDigits(text))) return false
+            return true
+        }
+
+        fun joinAddressRange(startExclusive: Int, endExclusive: Int): String? {
+            if (startExclusive < 0 || endExclusive <= startExclusive + 1) return null
+            val candidates = texts
+                .subList(startExclusive + 1, endExclusive.coerceAtMost(texts.size))
+                .filter(::isAddressLike)
+                .take(3)
+            return candidates.takeIf { it.isNotEmpty() }?.joinToString(" ")
+        }
+
+        val markerA = texts.indexOfFirst { it.trim().equals("A", ignoreCase = true) }
+        val markerB = texts.indexOfFirst { it.trim().equals("B", ignoreCase = true) }
+
+        val pickupFromMarkers = if (markerA >= 0 && markerB > markerA) {
+            joinAddressRange(markerA, markerB)
+        } else null
+
+        val actionBoundary = if (markerB >= 0) {
+            ((markerB + 1) until texts.size).firstOrNull { i ->
+                val t = texts[i]
+                t.contains("القبول مقابل") ||
+                    t.contains("اقترح أجرتك") ||
+                    t.contains("إغلاق")
+            } ?: texts.size
+        } else texts.size
+
+        val destinationFromMarkers = if (markerB >= 0) {
+            joinAddressRange(markerB, actionBoundary)
+        } else null
+
+        val fallbackAddresses = texts.filter(::isAddressLike)
 
         return RideOffer(
             app = AppTarget.INDRIVE,
             displayedPrice = price,
-            pickupDistanceKm = null,
-            pickupTimeMinutes = time,
-            tripDistanceKm = dist,
-            tripTimeMinutes = null,
-            pickupAddress = addresses.getOrNull(0),
-            destinationAddress = addresses.getOrNull(1),
-            confidence = if (price != null && dist != null) 90 else 50,
+            pickupDistanceKm = pickupDistance,
+            pickupTimeMinutes = pickupTime,
+            tripDistanceKm = tripDistance,
+            tripTimeMinutes = tripTime,
+            pickupAddress = pickupFromMarkers ?: fallbackAddresses.getOrNull(0),
+            destinationAddress = destinationFromMarkers ?: fallbackAddresses.getOrNull(1),
+            confidence = when {
+                price != null && tripDistance != null &&
+                    (pickupFromMarkers != null || fallbackAddresses.isNotEmpty()) &&
+                    (destinationFromMarkers != null || fallbackAddresses.size >= 2) -> 95
+                price != null && tripDistance != null -> 85
+                else -> 50
+            },
             rawSource = "ACCESSIBILITY"
         )
     }
+
 }

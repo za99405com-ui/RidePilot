@@ -44,17 +44,39 @@ object ArabicNumberHelper {
             .replace(",", ".")
             .replace("~", "")
 
-        // Check if string contains "متر" (meters)
-        if (normalized.contains("متر") || normalized.contains(" m") || normalized.contains("m ")) {
-            val regex = Regex("""\b\d+(?:\.\d+)?\b""")
-            val match = regex.find(normalized) ?: return null
-            val meters = match.value.toDoubleOrNull() ?: return null
-            return (meters / 1000.0)
+        // Match the number attached to the distance UNIT, not the first number in
+        // the string. inDrive frequently exposes combined labels such as:
+        // "21 دقيقة 9.2 كم". The old parser incorrectly returned 21 km.
+        val metersRegex = Regex(
+            """(\d+(?:\.\d+)?)\s*(?:متر|meters?|metres?|m)\b""",
+            RegexOption.IGNORE_CASE
+        )
+        metersRegex.find(normalized)?.groupValues?.getOrNull(1)
+            ?.toDoubleOrNull()
+            ?.let { return it / 1000.0 }
+
+        val kmRegex = Regex(
+            """(\d+(?:\.\d+)?)\s*(?:كم|كلم|كيلومتر|kilometers?|kilometres?|km)\b""",
+            RegexOption.IGNORE_CASE
+        )
+        kmRegex.find(normalized)?.groupValues?.getOrNull(1)
+            ?.toDoubleOrNull()
+            ?.let { return it }
+
+        // Conservative fallback for legacy labels that contain only one numeric
+        // value. Never use this fallback for labels that include time units.
+        if (
+            normalized.contains("دقيقة") ||
+            normalized.contains("min", ignoreCase = true)
+        ) {
+            return null
         }
 
-        // Default km extraction
-        val regex = Regex("""\b\d+(?:\.\d+)?\b""")
-        val match = regex.find(normalized) ?: return null
-        return match.value.toDoubleOrNull()
+        val values = Regex("""\b\d+(?:\.\d+)?\b""")
+            .findAll(normalized)
+            .mapNotNull { it.value.toDoubleOrNull() }
+            .toList()
+
+        return values.singleOrNull()
     }
 }

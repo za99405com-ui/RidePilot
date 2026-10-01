@@ -95,6 +95,63 @@ object UberParser {
             }
         }
 
+        // Newer Uber cards often expose time and distance as separate nodes
+        // (for example 2.6 km pickup and 11.2 km trip) instead of the old
+        // "11 دقيقة (4.4 كلم)" combined string. Fall back to any distance nodes
+        // in visual/accessibility order so the overlay can still be analysed.
+        if (pickupDistance == null || tripDistance == null) {
+            val distanceCandidates = allTexts.mapIndexedNotNull { index, text ->
+                val looksLikeDistance =
+                    text.contains("كلم") ||
+                    text.contains("كم") ||
+                    text.contains("km", ignoreCase = true) ||
+                    text.contains("متر")
+                if (!looksLikeDistance) {
+                    null
+                } else {
+                    ArabicNumberHelper.extractDistanceKm(text)?.let { index to it }
+                }
+            }.filter { it.second > 0.0 }
+
+            if (pickupDistance == null) {
+                pickupDistance = distanceCandidates.getOrNull(0)?.second
+            }
+            if (tripDistance == null) {
+                tripDistance = distanceCandidates
+                    .firstOrNull { (_, value) ->
+                        pickupDistance == null || kotlin.math.abs(value - pickupDistance!!) > 0.001
+                    }
+                    ?.second
+            }
+
+            if (matchedTimeDistanceIndices.size < 2) {
+                distanceCandidates.forEach { (index, _) ->
+                    if (index !in matchedTimeDistanceIndices) {
+                        matchedTimeDistanceIndices.add(index)
+                    }
+                }
+                matchedTimeDistanceIndices.sort()
+            }
+        }
+
+        if (pickupTime == null || tripTime == null) {
+            val timeCandidates = allTexts.mapNotNull { text ->
+                val normalized = ArabicNumberHelper.normalizeDigits(text)
+                val looksLikeTime =
+                    normalized.contains("دقيقة") ||
+                    Regex("""\b\d+\s*(?:د|min|mins)\b""", RegexOption.IGNORE_CASE)
+                        .containsMatchIn(normalized)
+                if (looksLikeTime) {
+                    ArabicNumberHelper.extractFirstDouble(normalized)?.toInt()
+                } else {
+                    null
+                }
+            }.filter { it > 0 }
+
+            if (pickupTime == null) pickupTime = timeCandidates.getOrNull(0)
+            if (tripTime == null) tripTime = timeCandidates.getOrNull(1)
+        }
+
         // Extract addresses: Typically placed right below or adjacent to the time/distance lines
         if (matchedTimeDistanceIndices.size >= 1) {
             val firstIdx = matchedTimeDistanceIndices[0]

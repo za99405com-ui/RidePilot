@@ -16,8 +16,9 @@ android {
     applicationId = "com.aistudio.ridepilot.vxbkq"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    val ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull()
+    versionCode = ciRunNumber ?: 1
+    versionName = if (ciRunNumber != null) "1.0.$ciRunNumber" else "1.0-local"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -98,6 +99,7 @@ dependencies {
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   implementation(libs.osmdroid.android)
+  implementation("org.locationtech.jts:jts-core:1.19.0")
   implementation(libs.play.services.mlkit.text.recognition)
   // implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
