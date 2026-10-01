@@ -24,6 +24,7 @@ import com.example.domain.parser.InDriveParser
 import com.example.domain.parser.UberParser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -76,7 +77,9 @@ class RidePilotAccessibilityService : AccessibilityService() {
     private val pendingRecheck = AtomicBoolean(false)
     private val passiveRecheckScheduled = AtomicBoolean(false)
     private val postGestureRecheckToken = AtomicInteger(0)
+    private val uberLockActive = AtomicBoolean(false)
     private var lastMapPreviewKey: String? = null
+    private var mapPreviewJob: Job? = null
 
     private val stateMachine by lazy {
         InDriveStateMachine(
@@ -195,6 +198,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
             _activeTarget.value = null
             _latestUberAnalysis.value = null
             _latestInDriveParsed.value = null
+            _latestInDriveMapPreview.value = null
             _liveCalibrationOffer.value = null
             _automationStatus.value = "STOP — التشغيل من تطبيق RidePilot فقط"
             if (RidePilotOverlayService.isOverlayRunning) {
@@ -210,6 +214,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
             _activeTarget.value = null
             _latestUberAnalysis.value = null
             _latestInDriveParsed.value = null
+            _latestInDriveMapPreview.value = null
             _liveCalibrationOffer.value = null
             _automationStatus.value = "متوقف مؤقتًا"
             ensureOverlayRunning()
@@ -220,6 +225,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
         // first; while an Uber offer is visible we only analyse it and avoid tapping the
         // inDrive window underneath.
         val uberRoots = findRootsForPackage(UBER_DRIVER_PACKAGE)
+        uberLockActive.set(uberRoots.isNotEmpty())
         var sawUberContent = false
 
         for (uberRoot in uberRoots) {
@@ -246,11 +252,13 @@ class RidePilotAccessibilityService : AccessibilityService() {
             return
         }
 
+        uberLockActive.set(false)
+
         val inDriveRoot = findRootForPackage(INDRIVE_PACKAGE) ?: return
         _activeTarget.value = AppTarget.INDRIVE
 
         val parsedScreen = InDriveParser.parseScreen(inDriveRoot)
-        _latestInDriveParsed.value = parsedScreen
+        _latestInDriveParsed.value = sanitizeForUi(parsedScreen)
         if (parsedScreen.activeOffer != null) {
             _liveCalibrationOffer.value = parsedScreen.activeOffer
         }
@@ -287,9 +295,11 @@ class RidePilotAccessibilityService : AccessibilityService() {
         // is visible so the next state is picked up without the user touching the app.
         if (automationEnabled) {
             val nextDelay = when (parsedScreen.screenType) {
-                InDriveParser.InDriveScreenType.WAITING_RESPONSE -> 320L
-                InDriveParser.InDriveScreenType.COUNTER_OFFER_INPUT -> 140L
-                else -> 220L
+                InDriveParser.InDriveScreenType.REQUESTS_LIST -> 10_000L
+                InDriveParser.InDriveScreenType.ORDER_DETAILS -> 450L
+                InDriveParser.InDriveScreenType.WAITING_RESPONSE -> 650L
+                InDriveParser.InDriveScreenType.COUNTER_OFFER_INPUT -> 220L
+                InDriveParser.InDriveScreenType.UNKNOWN -> 1_500L
             }
             schedulePassiveRecheck(nextDelay)
         }
@@ -327,7 +337,8 @@ class RidePilotAccessibilityService : AccessibilityService() {
         if (key == lastMapPreviewKey) return
         lastMapPreviewKey = key
 
-        serviceScope.launch {
+        mapPreviewJob?.cancel()
+        mapPreviewJob = serviceScope.launch {
             val resolved = InDriveRoutePreviewResolver.resolve(
                 context = applicationContext,
                 pickupAddress = pickup,
@@ -349,6 +360,14 @@ class RidePilotAccessibilityService : AccessibilityService() {
             }
         }
     }
+
+    private fun sanitizeForUi(
+        parsed: InDriveParser.InDriveParsedScreen
+    ): InDriveParser.InDriveParsedScreen =
+        parsed.copy(
+            orderCards = parsed.orderCards.map { it.copy(node = null) },
+            customOfferInputNode = null
+        )
 
     private suspend fun processUberOffer(app: RidePilotApplication, offer: RideOffer) {
         _liveCalibrationOffer.value = offer
@@ -492,7 +511,11 @@ class RidePilotAccessibilityService : AccessibilityService() {
     private suspend fun executeGesture(action: InDriveStateMachine.GestureAction): Boolean {
         // Final safety gate immediately before every automated action.
         val settings = RidePilotApplication.instance.settingsRepository
-        if (settings.emergencyStop.first() || !settings.automationEnabled.first()) {
+        if (
+            settings.emergencyStop.first() ||
+            !settings.automationEnabled.first() ||
+            uberLockActive.get()
+        ) {
             return false
         }
 
