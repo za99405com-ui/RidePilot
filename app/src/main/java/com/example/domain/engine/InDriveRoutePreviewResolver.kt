@@ -34,6 +34,13 @@ object InDriveRoutePreviewResolver {
 
     private val geocodeCache = ConcurrentHashMap<String, LatLngPoint>()
 
+    suspend fun resolveAddress(
+        context: Context,
+        address: String
+    ): LatLngPoint? = withContext(Dispatchers.IO) {
+        geocode(context, address)
+    }
+
     suspend fun resolve(
         context: Context,
         pickupAddress: String,
