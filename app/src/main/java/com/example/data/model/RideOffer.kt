@@ -43,6 +43,16 @@ data class RideOffer(
     val rawSource: String = "ACCESSIBILITY" // ACCESSIBILITY or OCR
 )
 
+data class InDriveMapPreview(
+    val pickupAddress: String,
+    val destinationAddress: String,
+    val pickupPoint: LatLngPoint,
+    val destinationPoint: LatLngPoint,
+    val routeDistanceKm: Double?,
+    val pickupDistanceKm: Double?,
+    val displayedPrice: Double?
+)
+
 data class RideAnalysis(
     val offer: RideOffer,
     val totalPricingDistanceKm: Double,
