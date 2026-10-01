@@ -13,9 +13,11 @@ import com.example.RidePilotApplication
 import com.example.data.model.AppLogEntry
 import com.example.data.model.AppTarget
 import com.example.data.model.AutomationState
+import com.example.data.model.InDriveMapPreview
 import com.example.data.model.PricingDistanceMode
 import com.example.data.model.RideAnalysis
 import com.example.data.model.RideOffer
+import com.example.domain.engine.InDriveRoutePreviewResolver
 import com.example.domain.engine.PricingEngine
 import com.example.domain.engine.ZoneEngine
 import com.example.domain.parser.InDriveParser
@@ -54,6 +56,9 @@ class RidePilotAccessibilityService : AccessibilityService() {
         private val _latestInDriveParsed = MutableStateFlow<InDriveParser.InDriveParsedScreen?>(null)
         val latestInDriveParsed: StateFlow<InDriveParser.InDriveParsedScreen?> = _latestInDriveParsed.asStateFlow()
 
+        private val _latestInDriveMapPreview = MutableStateFlow<InDriveMapPreview?>(null)
+        val latestInDriveMapPreview: StateFlow<InDriveMapPreview?> = _latestInDriveMapPreview.asStateFlow()
+
         private val _liveCalibrationOffer = MutableStateFlow<RideOffer?>(null)
         val liveCalibrationOffer: StateFlow<RideOffer?> = _liveCalibrationOffer.asStateFlow()
 
@@ -71,6 +76,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
     private val pendingRecheck = AtomicBoolean(false)
     private val passiveRecheckScheduled = AtomicBoolean(false)
     private val postGestureRecheckToken = AtomicInteger(0)
+    private var lastMapPreviewKey: String? = null
 
     private val stateMachine by lazy {
         InDriveStateMachine(
@@ -252,6 +258,10 @@ class RidePilotAccessibilityService : AccessibilityService() {
         val swipeDir = app.settingsRepository.swipeDirection.first()
         val distMode = app.settingsRepository.pricingDistanceMode.first()
         val zoneMode = app.settingsRepository.zoneVerificationMode.first()
+        val maxPickupDistanceKm = app.settingsRepository.maxPickupDistanceKm.first()
+
+        updateInDriveMapPreview(parsedScreen, maxPickupDistanceKm)
+
         val bands = app.pricingRepository.getBandsDirect(AppTarget.INDRIVE)
         val zones = app.zoneRepository.getEnabledZones()
         val negConfig = app.settingsRepository.negotiationConfig.first()
@@ -263,6 +273,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
             swipeDirection = swipeDir,
             pricingDistanceMode = distMode,
             zoneVerificationMode = zoneMode,
+            maxPickupDistanceKm = maxPickupDistanceKm,
             bands = bands,
             zones = zones,
             negotiationConfig = negConfig,
@@ -281,6 +292,61 @@ class RidePilotAccessibilityService : AccessibilityService() {
                 else -> 220L
             }
             schedulePassiveRecheck(nextDelay)
+        }
+    }
+
+    private fun updateInDriveMapPreview(
+        parsed: InDriveParser.InDriveParsedScreen,
+        maxPickupDistanceKm: Double
+    ) {
+        if (parsed.screenType != InDriveParser.InDriveScreenType.REQUESTS_LIST) return
+
+        val card = parsed.orderCards.firstOrNull { order ->
+            val pickupKm = order.distanceKm
+            !order.pickupAddress.isNullOrBlank() &&
+                !order.destinationAddress.isNullOrBlank() &&
+                pickupKm != null &&
+                pickupKm <= maxPickupDistanceKm
+        }
+
+        if (card == null) {
+            lastMapPreviewKey = null
+            _latestInDriveMapPreview.value = null
+            return
+        }
+
+        val pickup = card.pickupAddress ?: return
+        val destination = card.destinationAddress ?: return
+        val key = listOf(
+            pickup,
+            destination,
+            card.distanceKm?.toString().orEmpty(),
+            card.priceEgp?.toString().orEmpty()
+        ).joinToString("|")
+
+        if (key == lastMapPreviewKey) return
+        lastMapPreviewKey = key
+
+        serviceScope.launch {
+            val resolved = InDriveRoutePreviewResolver.resolve(
+                context = applicationContext,
+                pickupAddress = pickup,
+                destinationAddress = destination
+            )
+
+            if (key != lastMapPreviewKey) return@launch
+
+            _latestInDriveMapPreview.value = resolved?.let {
+                InDriveMapPreview(
+                    pickupAddress = pickup,
+                    destinationAddress = destination,
+                    pickupPoint = it.pickupPoint,
+                    destinationPoint = it.destinationPoint,
+                    routeDistanceKm = it.routeDistanceKm,
+                    pickupDistanceKm = card.distanceKm,
+                    displayedPrice = card.priceEgp
+                )
+            }
         }
     }
 
