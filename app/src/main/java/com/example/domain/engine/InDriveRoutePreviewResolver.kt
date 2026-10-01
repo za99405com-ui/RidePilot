@@ -44,7 +44,7 @@ object InDriveRoutePreviewResolver {
         if (geocodeCache.size >= MAX_CACHE_ENTRIES) {
             geocodeCache.clear()
         }
-        cachePoint(key, point)
+        geocodeCache[key] = point
     }
 
     suspend fun resolveAddress(
