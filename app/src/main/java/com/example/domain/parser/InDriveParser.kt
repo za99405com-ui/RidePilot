@@ -227,7 +227,7 @@ object InDriveParser {
         // Parse active order if in order details
         var activeOffer: RideOffer? = null
         if (screenType == InDriveScreenType.ORDER_DETAILS || screenType == InDriveScreenType.COUNTER_OFFER_INPUT) {
-            activeOffer = extractActiveOrderDetails(root)
+            activeOffer = extractActiveOrderDetails(findDetailsContainer(root) ?: root)
         }
 
         var confidence = 50
@@ -372,6 +372,69 @@ object InDriveParser {
             .sortedBy { it.bounds.top }
 
         cardsOut.addAll(unique)
+    }
+
+    /**
+     * inDrive opens ride details as a modal above the requests list. The underlying
+     * list remains present in the Accessibility tree, so parsing the full root can
+     * mix list-card distances (e.g. 1.5 km / 2.2 km) into the active ride.
+     *
+     * Find the smallest large ancestor of the modal heading and parse only that
+     * subtree. If the layout changes, safely fall back to the full root.
+     */
+    private fun findDetailsContainer(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val rootRect = Rect()
+        root.getBoundsInScreen(rootRect)
+        if (rootRect.width() <= 0 || rootRect.height() <= 0) return null
+
+        var marker: AccessibilityNodeInfo? = null
+
+        fun scan(node: AccessibilityNodeInfo) {
+            if (marker != null) return
+            val text = (node.text?.toString() ?: node.contentDescription?.toString())
+                ?.trim()
+                .orEmpty()
+
+            val isHeading =
+                text == "طلب ركوب" ||
+                    text.equals("Ride request", ignoreCase = true)
+
+            if (isHeading) {
+                marker = node
+                return
+            }
+
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                scan(child)
+                if (marker != null) return
+            }
+        }
+
+        scan(root)
+        val start = marker ?: return null
+
+        var current: AccessibilityNodeInfo? = start
+        var best: AccessibilityNodeInfo? = null
+        var hops = 0
+
+        while (current != null && hops < 10) {
+            val rect = Rect()
+            current.getBoundsInScreen(rect)
+
+            val wideEnough = rect.width() >= (rootRect.width() * 0.72f)
+            val tallEnough = rect.height() >= (rootRect.height() * 0.45f)
+
+            if (wideEnough && tallEnough) {
+                best = current
+                break
+            }
+
+            current = current.parent
+            hops++
+        }
+
+        return best
     }
 
     private fun extractActiveOrderDetails(root: AccessibilityNodeInfo): RideOffer? {
