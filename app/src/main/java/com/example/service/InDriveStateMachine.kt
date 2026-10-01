@@ -74,6 +74,7 @@ class InDriveStateMachine(
         swipeDirection: SwipeDirection,
         pricingDistanceMode: PricingDistanceMode,
         zoneVerificationMode: ZoneVerificationMode,
+        maxPickupDistanceKm: Double,
         bands: List<PricingBand>,
         zones: List<WorkZone>,
         negotiationConfig: NegotiationConfig,
@@ -130,7 +131,28 @@ class InDriveStateMachine(
                     }
                 }
 
-                val card = parsed.orderCards.firstOrNull() ?: return
+                val card = parsed.orderCards.firstOrNull { order ->
+                    val pickupKm = order.distanceKm
+                    pickupKm != null && pickupKm <= maxPickupDistanceKm
+                }
+
+                if (card == null) {
+                    val nearest = parsed.orderCards
+                        .mapNotNull { it.distanceKm }
+                        .minOrNull()
+
+                    if (nearest != null) {
+                        logger(
+                            "PICKUP_TOO_FAR",
+                            "لا يوجد طلب داخل حد الوصول ${maxPickupDistanceKm} كم • الأقرب ${nearest} كم",
+                            null,
+                            nearest,
+                            parsed.confidence
+                        )
+                    }
+                    return
+                }
+
                 val key = orderKey(card)
 
                 val now = System.currentTimeMillis()
