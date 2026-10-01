@@ -464,21 +464,28 @@ object InDriveParser {
         val distanceTexts = texts.filter {
             it.contains("كلم") || it.contains("كم") || it.contains("km", ignoreCase = true) || it.contains("متر")
         }
-        val distances = distanceTexts.mapNotNull { ArabicNumberHelper.extractDistanceKm(it) }
+        val distances = distanceTexts
+            .mapNotNull { ArabicNumberHelper.extractDistanceKm(it) }
+            .filter { it > 0.0 }
+            .distinctBy { (it * 1000.0).toInt() }
 
         val timeTexts = texts.filter {
             it.contains("دقيقة") || Regex("""\b\d+\s*د\b""").containsMatchIn(ArabicNumberHelper.normalizeDigits(it))
         }
-        val times = timeTexts.mapNotNull { ArabicNumberHelper.extractFirstDouble(it)?.toInt() }
+        val times = timeTexts
+            .mapNotNull { ArabicNumberHelper.extractFirstDouble(it)?.toInt() }
+            .filter { it > 0 }
+            .distinct()
 
-        val pickupDistance = if (distances.size >= 2) distances[0] else null
-        val tripDistance = when {
-            distances.size >= 2 -> distances[1]
-            distances.size == 1 -> distances[0]
-            else -> null
-        }
-        val pickupTime = if (times.size >= 2) times[0] else times.firstOrNull()
-        val tripTime = if (times.size >= 2) times[1] else null
+        // Safety rule: inDrive details normally expose pickup distance first and trip
+        // distance second. Never treat a single distance as the trip distance because
+        // that value can belong to the pickup leg or to a partially rendered screen.
+        // Returning null forces the automation to wait instead of accepting a fare
+        // using the wrong (too small) distance.
+        val pickupDistance = distances.getOrNull(0)
+        val tripDistance = distances.getOrNull(1)
+        val pickupTime = times.getOrNull(0)
+        val tripTime = times.getOrNull(1)
 
         val excluded = (distanceTexts + timeTexts + listOfNotNull(priceText)).toSet()
 
