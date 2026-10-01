@@ -40,20 +40,26 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import com.example.RidePilotApplication
 import com.example.data.model.AppTarget
+import com.example.data.model.InDriveMapPreview
 import com.example.service.RidePilotAccessibilityService
 import com.example.service.RidePilotOverlayService
 import com.example.ui.navigation.Screen
@@ -67,6 +73,12 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import kotlinx.coroutines.launch
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.BoundingBox
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.Polyline
 
 @Composable
 fun HomeScreen(navController: NavController) {
@@ -79,6 +91,7 @@ fun HomeScreen(navController: NavController) {
     val accessibilityConnected by RidePilotAccessibilityService.isServiceConnected.collectAsState()
     val uberAnalysis by RidePilotAccessibilityService.latestUberAnalysis.collectAsState()
     val inDriveParsed by RidePilotAccessibilityService.latestInDriveParsed.collectAsState()
+    val inDrivePreview by RidePilotAccessibilityService.latestInDriveMapPreview.collectAsState()
     val activeTarget by RidePilotAccessibilityService.activeTarget.collectAsState()
 
     Scaffold(containerColor = DarkBackground) { padding ->
@@ -210,6 +223,12 @@ fun HomeScreen(navController: NavController) {
                 }
             }
 
+            if (inDrivePreview != null) {
+                item {
+                    InDriveMapPreviewCard(preview = inDrivePreview!!)
+                }
+            }
+
             if (!accessibilityConnected || !Settings.canDrawOverlays(context)) {
                 item {
                     Card(
@@ -320,6 +339,128 @@ fun HomeScreen(navController: NavController) {
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun InDriveMapPreviewCard(preview: InDriveMapPreview) {
+    var mapView by remember { mutableStateOf<MapView?>(null) }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = DarkCard),
+        shape = RoundedCornerShape(20.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "معاينة طلب inDrive",
+                    color = TextPrimary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp
+                )
+                Text(
+                    "${preview.routeDistanceKm ?: "—"} كم",
+                    color = EmeraldPrimary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            AndroidView(
+                factory = { ctx ->
+                    MapView(ctx).apply {
+                        setTileSource(TileSourceFactory.MAPNIK)
+                        setMultiTouchControls(true)
+                        setBuiltInZoomControls(false)
+                        mapView = this
+                    }
+                },
+                update = { map ->
+                    map.overlays.removeAll { it is Marker || it is Polyline }
+
+                    val a = GeoPoint(
+                        preview.pickupPoint.latitude,
+                        preview.pickupPoint.longitude
+                    )
+                    val b = GeoPoint(
+                        preview.destinationPoint.latitude,
+                        preview.destinationPoint.longitude
+                    )
+
+                    map.overlays.add(
+                        Marker(map).apply {
+                            position = a
+                            title = "A • نقطة الركوب"
+                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                        }
+                    )
+                    map.overlays.add(
+                        Marker(map).apply {
+                            position = b
+                            title = "B • الوجهة"
+                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                        }
+                    )
+                    map.overlays.add(
+                        Polyline(map).apply {
+                            setPoints(listOf(a, b))
+                            outlinePaint.strokeWidth = 6f
+                        }
+                    )
+
+                    val north = maxOf(a.latitude, b.latitude) + 0.006
+                    val south = minOf(a.latitude, b.latitude) - 0.006
+                    val east = maxOf(a.longitude, b.longitude) + 0.006
+                    val west = minOf(a.longitude, b.longitude) - 0.006
+
+                    map.zoomToBoundingBox(
+                        BoundingBox(north, east, south, west),
+                        false,
+                        48
+                    )
+                    map.invalidate()
+                    mapView = map
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(180.dp)
+            )
+
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "A  ${preview.pickupAddress}",
+                color = TextPrimary,
+                fontSize = 11.sp,
+                maxLines = 2
+            )
+            Spacer(Modifier.height(5.dp))
+            Text(
+                "B  ${preview.destinationAddress}",
+                color = TextPrimary,
+                fontSize = 11.sp,
+                maxLines = 2
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "الوصول للعميل: ${preview.pickupDistanceKm ?: "—"} كم • السعر: ${preview.displayedPrice ?: "—"} ج",
+                color = TextSecondary,
+                fontSize = 11.sp
+            )
+        }
+    }
+
+    DisposableEffect(mapView) {
+        mapView?.onResume()
+        onDispose {
+            mapView?.onPause()
         }
     }
 }
