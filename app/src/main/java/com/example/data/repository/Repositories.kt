@@ -15,7 +15,10 @@ import kotlinx.coroutines.flow.Flow
 class PricingRepository(private val db: AppDatabase) {
     fun getBands(app: AppTarget): Flow<List<PricingBand>> = db.pricingBandDao().getBandsForApp(app)
     suspend fun getBandsDirect(app: AppTarget): List<PricingBand> = db.pricingBandDao().getBandsForAppDirect(app)
+    suspend fun getAllBandsDirect(): List<PricingBand> = db.pricingBandDao().getAllBandsDirect()
     suspend fun addBand(band: PricingBand) = db.pricingBandDao().insertBand(band)
+    suspend fun addBands(bands: List<PricingBand>) = db.pricingBandDao().insertBands(bands)
+    suspend fun clearBandsForApp(app: AppTarget) = db.pricingBandDao().clearBandsForApp(app)
     suspend fun updateBand(band: PricingBand) = db.pricingBandDao().updateBand(band)
     suspend fun deleteBand(band: PricingBand) = db.pricingBandDao().deleteBand(band)
 }
@@ -23,7 +26,10 @@ class PricingRepository(private val db: AppDatabase) {
 class ZoneRepository(private val db: AppDatabase) {
     fun getAllZones(): Flow<List<WorkZone>> = db.workZoneDao().getAllZones()
     suspend fun getEnabledZones(): List<WorkZone> = db.workZoneDao().getEnabledZones()
+    suspend fun getAllZonesDirect(): List<WorkZone> = db.workZoneDao().getAllZonesDirect()
     suspend fun addZone(zone: WorkZone) = db.workZoneDao().insertZone(zone)
+    suspend fun addZones(zones: List<WorkZone>) = db.workZoneDao().insertZones(zones)
+    suspend fun clearAllZones() = db.workZoneDao().clearAllZones()
     suspend fun updateZone(zone: WorkZone) = db.workZoneDao().updateZone(zone)
     suspend fun deleteZone(zone: WorkZone) = db.workZoneDao().deleteZone(zone)
     suspend fun deleteZoneById(id: Long) = db.workZoneDao().deleteZoneById(id)
