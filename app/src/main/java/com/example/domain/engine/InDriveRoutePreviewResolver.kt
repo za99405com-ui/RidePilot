@@ -32,7 +32,20 @@ object InDriveRoutePreviewResolver {
         .callTimeout(8, TimeUnit.SECONDS)
         .build()
 
+    private const val MAX_CACHE_ENTRIES = 256
     private val geocodeCache = ConcurrentHashMap<String, LatLngPoint>()
+
+    fun clearRuntimeCache() {
+        geocodeCache.clear()
+        client.connectionPool.evictAll()
+    }
+
+    private fun cachePoint(key: String, point: LatLngPoint) {
+        if (geocodeCache.size >= MAX_CACHE_ENTRIES) {
+            geocodeCache.clear()
+        }
+        cachePoint(key, point)
+    }
 
     suspend fun resolveAddress(
         context: Context,
@@ -76,7 +89,7 @@ object InDriveRoutePreviewResolver {
         }
 
         if (androidResult != null) {
-            geocodeCache[key] = androidResult
+            cachePoint(key, androidResult)
             return androidResult
         }
 
@@ -125,7 +138,7 @@ object InDriveRoutePreviewResolver {
                         lon in AlexandriaZoneCatalog.alexandriaWest..AlexandriaZoneCatalog.alexandriaEast
                     ) {
                         val point = LatLngPoint(lat, lon)
-                        geocodeCache[key] = point
+                        cachePoint(key, point)
                         return point
                     }
                 }
