@@ -81,6 +81,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
     private val uberLockActive = AtomicBoolean(false)
     private val forceInDriveCycle = AtomicBoolean(false)
     private var lastRequestsAutomationAt = 0L
+    private var lastKnownInDriveScreenType: InDriveParser.InDriveScreenType? = null
     private var lastMapPreviewKey: String? = null
     private var mapPreviewJob: Job? = null
     private var passiveRecheckJob: Job? = null
@@ -143,6 +144,17 @@ class RidePilotAccessibilityService : AccessibilityService() {
         Log.i(TAG, "RidePilot Accessibility Service Destroyed")
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            cancelTransientWork()
+            _latestInDriveMapPreview.value = null
+            InDriveRoutePreviewResolver.clearRuntimeCache()
+            ZoneEngine.clearRuntimeCache()
+            Log.w(TAG, "Low memory: transient RidePilot caches cleared")
+        }
+    }
+
     override fun onInterrupt() {
         Log.w(TAG, "RidePilot Accessibility Service Interrupted")
     }
@@ -160,8 +172,17 @@ class RidePilotAccessibilityService : AccessibilityService() {
         if (now - last < debounceMs) return
         lastEventByPackage[packageName] = now
 
-        // Conflate rapid Accessibility events instead of dropping a screen transition.
-        // This is important when a tap opens the custom-offer editor immediately.
+        if (
+            packageName == INDRIVE_PACKAGE &&
+            (
+                event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                    event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED ||
+                    event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED
+                )
+        ) {
+            forceInDriveCycle.set(true)
+        }
+
         requestWindowProcessing()
     }
 
@@ -225,6 +246,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
             cancelTransientWork()
             stateMachine.reset()
             lastRequestsAutomationAt = 0L
+            lastKnownInDriveScreenType = null
             _activeTarget.value = null
             _latestUberAnalysis.value = null
             _latestInDriveParsed.value = null
@@ -243,6 +265,7 @@ class RidePilotAccessibilityService : AccessibilityService() {
             cancelTransientWork()
             stateMachine.reset()
             lastRequestsAutomationAt = 0L
+            lastKnownInDriveScreenType = null
             _activeTarget.value = null
             _latestUberAnalysis.value = null
             _latestInDriveParsed.value = null
@@ -286,26 +309,33 @@ class RidePilotAccessibilityService : AccessibilityService() {
 
         uberLockActive.set(false)
 
+        // Critical performance gate: when the last known screen is the requests
+        // list, do not even traverse/allocate the Accessibility tree more than once
+        // per 10 seconds. Real window/click transitions set forceInDriveCycle.
+        val now = System.currentTimeMillis()
+        val forcedCycle = forceInDriveCycle.getAndSet(false)
+        if (
+            !forcedCycle &&
+            lastKnownInDriveScreenType == InDriveParser.InDriveScreenType.REQUESTS_LIST &&
+            now - lastRequestsAutomationAt < 10_000L
+        ) {
+            ensureOverlayRunning()
+            return
+        }
+
         val inDriveRoot = findRootForPackage(INDRIVE_PACKAGE) ?: return
         _activeTarget.value = AppTarget.INDRIVE
 
         val parsedScreen = InDriveParser.parseScreen(inDriveRoot)
+        lastKnownInDriveScreenType = parsedScreen.screenType
         _latestInDriveParsed.value = sanitizeForUi(parsedScreen)
         if (parsedScreen.activeOffer != null) {
             _liveCalibrationOffer.value = parsedScreen.activeOffer
         }
 
-        val forcedCycle = forceInDriveCycle.getAndSet(false)
         if (parsedScreen.screenType == InDriveParser.InDriveScreenType.REQUESTS_LIST) {
-            val now = System.currentTimeMillis()
-            if (!forcedCycle && now - lastRequestsAutomationAt < 10_000L) {
-                ensureOverlayRunning()
-                return
-            }
             lastRequestsAutomationAt = now
         } else {
-            // Screen transitions/details are handled immediately and do not consume
-            // the 10-second list refresh window.
             lastRequestsAutomationAt = 0L
         }
 
